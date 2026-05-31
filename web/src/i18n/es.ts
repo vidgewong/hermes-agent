@@ -50,12 +50,12 @@ export const es: Translations = {
   },
 
   app: {
-    brand: "Hermes Agent",
-    brandShort: "HA",
+    brand: "OpenStar",
+    brandShort: "OS",
     closeNavigation: "Cerrar navegación",
     closeModelTools: "Cerrar modelo y herramientas",
     footer: {
-      org: "Nous Research",
+      org: "Mercedes-Benz",
     },
     activeSessionsLabel: "Sesiones activas:",
     gatewayStatusLabel: "Estado del Gateway:",
@@ -67,6 +67,7 @@ export const es: Translations = {
       stopped: "Detenido",
     },
     nav: {
+      agents: "Agents",
       analytics: "Analíticas",
       chat: "Chat",
       config: "Configuración",
@@ -120,9 +121,31 @@ export const es: Translations = {
     starting: "Iniciando",
     startedInBackground: "Iniciado en segundo plano — revisa los registros para ver el progreso",
     stopped: "Detenido",
-    updateHermes: "Actualizar Hermes",
-    updatingHermes: "Actualizando Hermes…",
+    updateHermes: "Actualizar OpenStar",
+    updatingHermes: "Actualizando OpenStar…",
     waitingForOutput: "Esperando salida…",
+  },
+
+  agents: {
+    title: "Mercedes-Benz Agents",
+    loadFailed: "Failed to load agents",
+    lastActive: "Last active",
+    online: "Online",
+    busy: "Busy",
+    offline: "Offline",
+    model: "Model",
+    currentTask: "Current Task",
+    recentActions: "Recent Actions",
+    noActiveTask: "No active task",
+    noRecentActivity: "No recent activity",
+    startChat: "Start Chat",
+    knowledge: "Knowledge",
+    skills: "Skills",
+    memoryLabel: "Memory",
+    l0Label: "L0 · Workflow",
+    l1Label: "L1 · Domain",
+    l2Label: "L2 · Module",
+    modelSwitchNotImplemented: "Model switch not yet implemented",
   },
 
   sessions: {

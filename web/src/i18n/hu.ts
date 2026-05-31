@@ -50,12 +50,12 @@ export const hu: Translations = {
   },
 
   app: {
-    brand: "Hermes Agent",
-    brandShort: "HA",
+    brand: "OpenStar",
+    brandShort: "OS",
     closeNavigation: "Navigáció bezárása",
     closeModelTools: "Modell és eszközök bezárása",
     footer: {
-      org: "Nous Research",
+      org: "Mercedes-Benz",
     },
     activeSessionsLabel: "Aktív munkamenetek:",
     gatewayStatusLabel: "Átjáró állapota:",
@@ -67,6 +67,7 @@ export const hu: Translations = {
       stopped: "Leállítva",
     },
     nav: {
+      agents: "Agents",
       analytics: "Analitika",
       chat: "Csevegés",
       config: "Beállítások",
@@ -120,9 +121,31 @@ export const hu: Translations = {
     starting: "Indul",
     startedInBackground: "Háttérben elindítva — kövesse a naplókat a folyamathoz",
     stopped: "Leállítva",
-    updateHermes: "Hermes frissítése",
-    updatingHermes: "Hermes frissítése…",
+    updateHermes: "OpenStar frissítése",
+    updatingHermes: "OpenStar frissítése…",
     waitingForOutput: "Várakozás a kimenetre…",
+  },
+
+  agents: {
+    title: "Mercedes-Benz Agents",
+    loadFailed: "Failed to load agents",
+    lastActive: "Last active",
+    online: "Online",
+    busy: "Busy",
+    offline: "Offline",
+    model: "Model",
+    currentTask: "Current Task",
+    recentActions: "Recent Actions",
+    noActiveTask: "No active task",
+    noRecentActivity: "No recent activity",
+    startChat: "Start Chat",
+    knowledge: "Knowledge",
+    skills: "Skills",
+    memoryLabel: "Memory",
+    l0Label: "L0 · Workflow",
+    l1Label: "L1 · Domain",
+    l2Label: "L2 · Module",
+    modelSwitchNotImplemented: "Model switch not yet implemented",
   },
 
   sessions: {

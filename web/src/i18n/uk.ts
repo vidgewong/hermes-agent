@@ -50,12 +50,12 @@ export const uk: Translations = {
   },
 
   app: {
-    brand: "Hermes Agent",
-    brandShort: "HA",
+    brand: "OpenStar",
+    brandShort: "OS",
     closeNavigation: "Закрити навігацію",
     closeModelTools: "Закрити модель та інструменти",
     footer: {
-      org: "Nous Research",
+      org: "Mercedes-Benz",
     },
     activeSessionsLabel: "Активні сесії:",
     gatewayStatusLabel: "Стан шлюзу:",
@@ -67,6 +67,7 @@ export const uk: Translations = {
       stopped: "Зупинено",
     },
     nav: {
+      agents: "Agents",
       analytics: "Аналітика",
       chat: "Чат",
       config: "Конфігурація",
@@ -120,9 +121,31 @@ export const uk: Translations = {
     starting: "Запускається",
     startedInBackground: "Запущено у фоні — перевірте журнали для прогресу",
     stopped: "Зупинено",
-    updateHermes: "Оновити Hermes",
-    updatingHermes: "Оновлення Hermes…",
+    updateHermes: "Оновити OpenStar",
+    updatingHermes: "Оновлення OpenStar…",
     waitingForOutput: "Очікування виводу…",
+  },
+
+  agents: {
+    title: "Mercedes-Benz Agents",
+    loadFailed: "Failed to load agents",
+    lastActive: "Last active",
+    online: "Online",
+    busy: "Busy",
+    offline: "Offline",
+    model: "Model",
+    currentTask: "Current Task",
+    recentActions: "Recent Actions",
+    noActiveTask: "No active task",
+    noRecentActivity: "No recent activity",
+    startChat: "Start Chat",
+    knowledge: "Knowledge",
+    skills: "Skills",
+    memoryLabel: "Memory",
+    l0Label: "L0 · Workflow",
+    l1Label: "L1 · Domain",
+    l2Label: "L2 · Module",
+    modelSwitchNotImplemented: "Model switch not yet implemented",
   },
 
   sessions: {

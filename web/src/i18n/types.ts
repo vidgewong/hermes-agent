@@ -87,6 +87,7 @@ export interface Translations {
       stopped: string;
     };
     nav: {
+      agents: string;
       analytics: string;
       chat: string;
       config: string;
@@ -154,6 +155,29 @@ export interface Translations {
     updateHermesConfirmTitle?: string;
     updatingHermes: string;
     waitingForOutput: string;
+  };
+
+  // ── Agents page ──
+  agents: {
+    title: string;
+    loadFailed: string;
+    lastActive: string;
+    online: string;
+    busy: string;
+    offline: string;
+    model: string;
+    currentTask: string;
+    recentActions: string;
+    noActiveTask: string;
+    noRecentActivity: string;
+    startChat: string;
+    knowledge: string;
+    skills: string;
+    memoryLabel: string;
+    l0Label: string;
+    l1Label: string;
+    l2Label: string;
+    modelSwitchNotImplemented: string;
   };
 
   // ── Sessions page ──
