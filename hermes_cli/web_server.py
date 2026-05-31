@@ -8348,6 +8348,190 @@ async def prune_sessions_endpoint(body: SessionPrune):
 
 
 # ---------------------------------------------------------------------------
+# OpenStar Agents endpoint
+# ---------------------------------------------------------------------------
+
+_AVAILABLE_MODELS = [
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
+    "claude-haiku-4-5",
+]
+
+_OPENSTAR_AGENTS = [
+    {
+        "id": "mb-req",
+        "name": "MB-REQ Agent",
+        "description": "Requirements generation agent for ASPICE SWE.1",
+        "icon": "FileText",
+        "model": "claude-sonnet-4-6",
+        "available_models": _AVAILABLE_MODELS,
+        "knowledge": {
+            "skills": [
+                {
+                    "name": "requirement-generation",
+                    "l0_summary": "从系统需求生成完整的软件需求，遵循 ASPICE SWE.1 过程域标准",
+                    "l1": {
+                        "categories": [
+                            {"name": "architecture", "files": ["system-overview.md", "qnx-android-split.md", "communication/someip-rules.md"]},
+                            {"name": "aspice", "files": ["swe1-process.md", "qa-attributes.md"]},
+                            {"name": "writing-rules", "files": ["requirement-format.md", "shall-should-rules.md"]},
+                        ]
+                    },
+                    "l2": {
+                        "modules": [
+                            {"name": "audio", "files": ["audio-module-rules.md", "codec-constraints.md", "fade-timing.md"]},
+                            {"name": "adas", "files": ["safety-levels.md", "sensor-interfaces.md"]},
+                            {"name": "health-monitor", "files": ["hm-requirements.md", "watchdog-rules.md"]},
+                        ]
+                    },
+                },
+                {
+                    "name": "dng-integration",
+                    "l0_summary": "DNG 系统集成：读取、推送需求到 IBM DOORS Next Generation",
+                    "l1": {
+                        "categories": [
+                            {"name": "dng-api", "files": ["dng-api-guide.md", "dng-pagination-quirks.md"]},
+                        ]
+                    },
+                    "l2": {
+                        "modules": [
+                            {"name": "audio", "files": ["audio-dng-views.md"]},
+                            {"name": "adas", "files": ["adas-dng-views.md"]},
+                        ]
+                    },
+                },
+                {
+                    "name": "clarification-protocol",
+                    "l0_summary": "缺少信息时的澄清协议：如何向用户提问以获取缺失上下文",
+                    "l1": {
+                        "categories": [
+                            {"name": "patterns", "files": ["common-missing-info.md"]},
+                        ]
+                    },
+                    "l2": {"modules": []},
+                },
+            ],
+            "memory_summary": "23 条经验记录，最近更新于 2026-05-28",
+        },
+    },
+    {
+        "id": "mb-test",
+        "name": "MB-Test Agent",
+        "description": "Test case generation agent for ASPICE SWE.6",
+        "icon": "FlaskConical",
+        "model": "claude-sonnet-4-6",
+        "available_models": _AVAILABLE_MODELS,
+        "knowledge": {
+            "skills": [
+                {
+                    "name": "test-generation",
+                    "l0_summary": "从软件需求生成测试用例，遵循 ASPICE SWE.6 过程域标准，推送到 STARC",
+                    "l1": {
+                        "categories": [
+                            {"name": "test-framework", "files": ["starc-format.md", "test-case-template.md", "boundary-analysis.md"]},
+                            {"name": "aspice", "files": ["swe6-process.md", "test-coverage-rules.md"]},
+                        ]
+                    },
+                    "l2": {
+                        "modules": [
+                            {"name": "audio", "files": ["audio-test-patterns.md", "fade-timing-tests.md"]},
+                            {"name": "adas", "files": ["adas-safety-tests.md", "sensor-boundary-tests.md"]},
+                        ]
+                    },
+                },
+                {
+                    "name": "starc-integration",
+                    "l0_summary": "STARC 系统集成：推送测试用例到 STARC 平台",
+                    "l1": {
+                        "categories": [
+                            {"name": "starc-api", "files": ["starc-api-guide.md", "starc-auth.md"]},
+                        ]
+                    },
+                    "l2": {"modules": []},
+                },
+            ],
+            "memory_summary": "15 条经验记录，最近更新于 2026-05-25",
+        },
+    },
+    {
+        "id": "mb-arch",
+        "name": "MB-Arch Agent",
+        "description": "Architecture quality review agent",
+        "icon": "Building2",
+        "model": "claude-sonnet-4-6",
+        "available_models": _AVAILABLE_MODELS,
+        "knowledge": {
+            "skills": [
+                {
+                    "name": "architecture-review",
+                    "l0_summary": "审查 MR 中的架构合规性，检测接口定义、分层违规、命名规范等问题",
+                    "l1": {
+                        "categories": [
+                            {"name": "quality-standards", "files": ["interface-naming.md", "layer-boundaries.md", "error-handling.md"]},
+                            {"name": "design-patterns", "files": ["observer-pattern.md", "factory-pattern.md", "dependency-injection.md"]},
+                        ]
+                    },
+                    "l2": {
+                        "modules": [
+                            {"name": "audio", "files": ["audio-architecture.md", "audio-interfaces.md"]},
+                            {"name": "adas", "files": ["adas-architecture.md", "adas-safety-layers.md"]},
+                        ]
+                    },
+                },
+                {
+                    "name": "code-review",
+                    "l0_summary": "代码质量审查：检测代码异味、性能问题、安全隐患",
+                    "l1": {
+                        "categories": [
+                            {"name": "cpp-standards", "files": ["misra-rules.md", "autosar-guidelines.md"]},
+                        ]
+                    },
+                    "l2": {"modules": []},
+                },
+            ],
+            "memory_summary": "8 条经验记录，最近更新于 2026-05-30",
+        },
+    },
+]
+
+
+@app.get("/api/openstar/agents")
+async def get_openstar_agents():
+    """Return the list of OpenStar business agents with runtime status."""
+    agents = []
+    for agent_def in _OPENSTAR_AGENTS:
+        status = "offline"
+        last_active = None
+        try:
+            from hermes_state import SessionDB
+            db = SessionDB()
+            try:
+                sessions = db.list_sessions_rich(limit=1, offset=0)
+                for s in sessions:
+                    if s.get("source") == agent_def["id"] or (
+                        s.get("title") and agent_def["id"] in s.get("title", "").lower()
+                    ):
+                        now = time.time()
+                        sess_last = s.get("last_active", s.get("started_at", 0))
+                        if s.get("ended_at") is None and (now - sess_last) < 300:
+                            status = "online"
+                        last_active = s.get("last_active")
+                        break
+            finally:
+                db.close()
+        except Exception:
+            pass
+        agents.append({
+            **agent_def,
+            "status": status,
+            "last_active": last_active,
+            "current_task": None,
+            "recent_actions": [],
+        })
+    return {"agents": agents}
+
+
+# ---------------------------------------------------------------------------
 # Log viewer endpoint
 # ---------------------------------------------------------------------------
 

@@ -212,6 +212,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   // treat the current resume target as part of the PTY identity and rebuild the
   // terminal session when it changes.
   const resumeParam = searchParams.get("resume");
+  const commandParam = searchParams.get("command");
   // Profile-scoped chat: spawn the PTY under the globally selected
   // management profile. Changing it remounts the terminal (key below /
   // effect dep) so the user explicitly starts a fresh scoped session.
@@ -717,6 +718,16 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
           }
         }, 800);
       }
+
+      // Pre-fill slash command from URL param (e.g., /chat?command=/mb-req).
+      // Delay slightly to let TUI initialize its input before writing.
+      if (commandParam) {
+        setTimeout(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(commandParam);
+          }
+        }, 500);
+      }
     };
 
     ws.onmessage = (ev) => {
@@ -855,7 +866,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
         copyResetRef.current = null;
       }
     };
-  }, [channel, clearReconnectTimer, resumeParam, scopedProfile, reconnectNonce]);
+  }, [channel, clearReconnectTimer, resumeParam, scopedProfile, reconnectNonce, commandParam]);
 
   // When the user returns to the chat tab (isActive: false → true), the
   // terminal host just transitioned from display:none to display:flex.

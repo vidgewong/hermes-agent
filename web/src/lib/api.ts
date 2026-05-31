@@ -455,6 +455,8 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, recursive }),
     }),
+  getOpenStarAgents: () =>
+    fetchJSON<OpenStarAgentsResponse>("/api/openstar/agents"),
   getLogs: (params: { file?: string; lines?: number; level?: string; component?: string }) => {
     const qs = new URLSearchParams();
     if (params.file) qs.set("file", params.file);
@@ -1700,6 +1702,46 @@ export interface PaginatedSessions {
   total: number;
   limit: number;
   offset: number;
+}
+
+export interface AgentSkillL1Category {
+  name: string;
+  files: string[];
+}
+
+export interface AgentSkillL2Module {
+  name: string;
+  files: string[];
+}
+
+export interface AgentSkill {
+  name: string;
+  l0_summary: string;
+  l1: { categories: AgentSkillL1Category[] };
+  l2: { modules: AgentSkillL2Module[] };
+}
+
+export interface AgentKnowledge {
+  skills: AgentSkill[];
+  memory_summary: string;
+}
+
+export interface OpenStarAgent {
+  id: string;
+  name: string;
+  description: string;
+  status: "online" | "busy" | "offline";
+  icon: string;
+  last_active: number | null;
+  model: string;
+  available_models: string[];
+  current_task: string | null;
+  recent_actions: string[];
+  knowledge: AgentKnowledge;
+}
+
+export interface OpenStarAgentsResponse {
+  agents: OpenStarAgent[];
 }
 
 export interface EnvVarInfo {

@@ -49,12 +49,12 @@ export const zh: Translations = {
   },
 
   app: {
-    brand: "Hermes Agent",
-    brandShort: "HA",
+    brand: "OpenStar",
+    brandShort: "OS",
     closeNavigation: "关闭导航",
     closeModelTools: "关闭模型与工具",
     footer: {
-      org: "Nous Research",
+      org: "Mercedes-Benz",
     },
     activeSessionsLabel: "活跃会话：",
     gatewayStatusLabel: "网关状态：",
@@ -66,6 +66,7 @@ export const zh: Translations = {
       stopped: "已停止",
     },
     nav: {
+      agents: "智能体",
       analytics: "分析",
       chat: "对话",
       config: "配置",
@@ -119,9 +120,31 @@ export const zh: Translations = {
     starting: "启动中",
     startedInBackground: "已在后台启动 — 请查看日志",
     stopped: "已停止",
-    updateHermes: "更新 Hermes",
-    updatingHermes: "正在更新 Hermes…",
+    updateHermes: "更新 OpenStar",
+    updatingHermes: "正在更新 OpenStar…",
     waitingForOutput: "等待输出…",
+  },
+
+  agents: {
+    title: "Mercedes-Benz Agents",
+    loadFailed: "加载智能体失败",
+    lastActive: "最近活跃",
+    online: "在线",
+    busy: "忙碌",
+    offline: "离线",
+    model: "模型",
+    currentTask: "当前任务",
+    recentActions: "最近操作",
+    noActiveTask: "暂无活跃任务",
+    noRecentActivity: "暂无近期活动",
+    startChat: "开始对话",
+    knowledge: "知识层",
+    skills: "技能",
+    memoryLabel: "记忆",
+    l0Label: "L0 · 工作流",
+    l1Label: "L1 · 领域知识",
+    l2Label: "L2 · 模块专属",
+    modelSwitchNotImplemented: "模型切换功能尚未实现",
   },
 
   sessions: {
