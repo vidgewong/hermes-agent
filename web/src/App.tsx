@@ -21,7 +21,6 @@ import {
 import {
   Activity,
   BarChart3,
-  BookOpen,
   Bot,
   Clock,
   Code,
@@ -202,12 +201,6 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
   { path: "/system", label: "System", icon: Wrench },
-  {
-    path: "/docs",
-    labelKey: "documentation",
-    label: "Documentation",
-    icon: BookOpen,
-  },
 ];
 
 const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
@@ -439,7 +432,12 @@ export default function App() {
 
   const builtinNav = useMemo(() => {
     const base = embeddedChat
-      ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST]
+      ? (() => {
+          const rest = [...BUILTIN_NAV_REST];
+          const agentsIdx = rest.findIndex((i) => i.path === "/agents");
+          rest.splice(agentsIdx >= 0 ? agentsIdx + 1 : 0, 0, CHAT_NAV_ITEM);
+          return rest;
+        })()
       : BUILTIN_NAV_REST;
     return showTokenAnalytics
       ? base
