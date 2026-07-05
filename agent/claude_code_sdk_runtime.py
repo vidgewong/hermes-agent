@@ -48,6 +48,12 @@ def run_claude_code_sdk_turn(
         _last_tool_id = []  # track tool_call_id for complete callback
         _last_tool_args = []  # track args for complete callback
 
+        def _normalize_tool_name(raw: str) -> str:
+            """Strip mcp__hermes-tools__ prefix so display matches native Hermes."""
+            if raw.startswith("mcp__hermes-tools__"):
+                return raw[len("mcp__hermes-tools__"):]
+            return raw
+
         def _on_event(event: dict) -> None:
             progress_callback = getattr(agent, "tool_progress_callback", None)
             start_callback = getattr(agent, "tool_start_callback", None)
@@ -57,7 +63,7 @@ def run_claude_code_sdk_turn(
             if event.get("type") == "assistant":
                 for block in event.get("blocks", []):
                     if block.get("type") == "tool_use":
-                        tool_name = block.get("name", "")
+                        tool_name = _normalize_tool_name(block.get("name", ""))
                         tool_id = block.get("id", "") or f"cc_{id(block)}"
                         tool_input = block.get("input", {})
                         if isinstance(tool_input, dict):
@@ -153,12 +159,20 @@ def run_claude_code_sdk_turn(
                     except Exception:
                         pass
 
+        # Resume a previous claude CLI session if one was persisted for this
+        # Hermes session (survives gateway restarts).
+        _resume_id = _load_sdk_session_id(agent)
+        if _resume_id and not getattr(agent, "quiet_mode", False):
+            agent._vprint(f"{getattr(agent, 'log_prefix', '')}↩️  Resuming Claude Code SDK session {_resume_id}")
+
         agent._claude_code_session = ClaudeCodeSession(
             agent=agent,
             cwd=cwd,
             model=agent.model if "claude" in (agent.model or "").lower() else None,
-            system_prompt=getattr(agent, "active_system_prompt", None),
+            system_prompt=getattr(agent, "_cached_system_prompt", None),
             max_turns=agent.max_iterations,
+            mcp_servers=_build_hermes_tools_mcp_config(),
+            resume=_resume_id,
             on_event=_on_event,
             on_stream_delta=_on_stream_delta,
         )
@@ -178,9 +192,43 @@ def run_claude_code_sdk_turn(
     loop = agent._claude_code_loop
     try:
         asyncio.set_event_loop(loop)
-        turn: ClaudeCodeTurnResult = loop.run_until_complete(
-            agent._claude_code_session.run_turn(user_input=user_message)
+        # Pass original_user_message when it's a content list (multimodal —
+        # images, files) so image blocks reach the claude CLI intact.
+        # user_message is always a plain string (text extracted for logging);
+        # original_user_message preserves the raw platform payload.
+        _turn_input = (
+            original_user_message
+            if isinstance(original_user_message, list)
+            else user_message
         )
+
+        async def _run_with_interrupt_watcher():
+            """Run the SDK turn while watching for AIAgent.interrupt() signals."""
+            session = agent._claude_code_session
+            turn_task = asyncio.ensure_future(session.run_turn(user_input=_turn_input))
+
+            async def _interrupt_watcher():
+                while not turn_task.done():
+                    if getattr(agent, "_interrupt_requested", False):
+                        try:
+                            await session.interrupt()
+                        except Exception:
+                            pass
+                        break
+                    await asyncio.sleep(0.1)
+
+            watcher_task = asyncio.ensure_future(_interrupt_watcher())
+            try:
+                result = await turn_task
+            finally:
+                watcher_task.cancel()
+                try:
+                    await watcher_task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            return result
+
+        turn: ClaudeCodeTurnResult = loop.run_until_complete(_run_with_interrupt_watcher())
     except Exception as exc:
         logger.exception("claude-code-sdk turn failed")
         try:
@@ -267,6 +315,10 @@ def run_claude_code_sdk_turn(
     except Exception:
         logger.debug("session persist raised", exc_info=True)
 
+    # Persist claude CLI session ID so it can be resumed after a gateway restart.
+    if turn.session_id:
+        _persist_sdk_session_id(agent, turn.session_id)
+
     return {
         "final_response": turn.final_text,
         "messages": messages,
@@ -319,14 +371,122 @@ def _record_usage(agent, turn) -> None:
             )
 
 
+def _persist_sdk_session_id(agent, sdk_session_id: str) -> None:
+    """Save the claude CLI session ID into the Hermes session's model_config.
+
+    Stored as model_config._claude_code_sdk_session so it survives gateway
+    restarts and can be passed as resume= on the next ClaudeCodeSession.
+    """
+    import json as _json
+    try:
+        db = getattr(agent, "_session_db", None)
+        hermes_session_id = getattr(agent, "session_id", None)
+        if not db or not hermes_session_id:
+            return
+        # Read current model_config, merge in the SDK session ID, write back.
+        row = db.get_session(hermes_session_id)
+        raw = (row.get("model_config") if row else None) or "{}"
+        try:
+            cfg = _json.loads(raw)
+        except Exception:
+            cfg = {}
+        cfg["_claude_code_sdk_session"] = sdk_session_id
+        db.update_session_meta(hermes_session_id, _json.dumps(cfg))
+    except Exception as exc:
+        logger.debug("Failed to persist sdk session id: %s", exc)
+
+
+def _load_sdk_session_id(agent) -> str | None:
+    """Return the previously persisted claude CLI session ID, if any."""
+    import json as _json
+    try:
+        db = getattr(agent, "_session_db", None)
+        hermes_session_id = getattr(agent, "session_id", None)
+        if not db or not hermes_session_id:
+            return None
+        row = db.get_session(hermes_session_id)
+        if not row:
+            return None
+        raw = row.get("model_config") or "{}"
+        cfg = _json.loads(raw)
+        return cfg.get("_claude_code_sdk_session") or None
+    except Exception:
+        return None
+
+
+def _build_hermes_tools_mcp_config() -> dict:
+    """Build the mcp_servers dict that injects Hermes tools into the Claude Code SDK session.
+
+    Spawns agent.transports.hermes_tools_mcp_server as a stdio MCP subprocess so
+    the Claude CLI can call web_search, browser_*, vision_analyze, etc. alongside
+    its built-in tools (Bash, Read, Write, …).
+
+    Uses the same venv Python that is running Hermes, so all tool dependencies
+    (firecrawl, playwright, etc.) are available without extra setup.
+
+    Returns an empty dict if the mcp package is not installed (graceful degradation).
+    """
+    import sys
+    import os
+
+    try:
+        import mcp  # noqa: F401 — presence check only
+    except ImportError:
+        logger.debug("mcp package not installed; skipping hermes-tools MCP bridge")
+        return {}
+
+    # Resolve the hermes-agent root so the module can be found regardless of cwd.
+    hermes_root = str(_hermes_agent_root())
+
+    return {
+        "hermes-tools": {
+            "type": "stdio",
+            "command": sys.executable,
+            "args": ["-m", "agent.transports.hermes_tools_mcp_server"],
+            "env": {
+                # The claude CLI inherits the parent process env, so credentials
+                # (ANTHROPIC_*, FIRECRAWL_*, etc.) reach the MCP subprocess
+                # automatically. We only need to ensure the module is importable.
+                "PYTHONPATH": hermes_root,
+                "HERMES_QUIET": "1",
+                "HERMES_REDACT_SECRETS": "true",
+                # Forward session-type flags so tools whose check_fn gates on
+                # these (e.g. cronjob requires HERMES_GATEWAY_SESSION or
+                # HERMES_INTERACTIVE) are available inside the MCP subprocess.
+                **{
+                    k: os.environ[k]
+                    for k in (
+                        "HERMES_GATEWAY_SESSION",
+                        "HERMES_INTERACTIVE",
+                        "HERMES_EXEC_ASK",
+                        "HERMES_CRON_SESSION",
+                    )
+                    if k in os.environ
+                },
+            },
+        }
+    }
+
+
+def _hermes_agent_root() -> "Path":
+    """Return the hermes-agent project root (parent of the agent/ package)."""
+    from pathlib import Path
+    return Path(__file__).resolve().parent.parent
+
+
 def _build_tool_preview(tool_name: str, tool_input: dict) -> str:
-    """Build a concise preview string for a tool call."""
-    if tool_name == "Bash" and "command" in tool_input:
+    """Build a concise preview string for a tool call.
+
+    tool_name is always the normalized (mcp__ prefix stripped) name.
+    """
+    # Shell execution — Bash (Claude Code built-in) or terminal (Hermes)
+    if tool_name in ("Bash", "terminal") and "command" in tool_input:
         cmd = tool_input["command"]
         return cmd[:120] + "..." if len(cmd) > 120 else cmd
-    if tool_name in ("Read", "Write", "Edit") and "file_path" in tool_input:
+    # File tools — native or Hermes equivalents
+    if tool_name in ("Read", "Write", "Edit", "read_file", "write_file", "patch") and "file_path" in tool_input:
         return tool_input["file_path"]
-    if tool_name == "Grep" and "pattern" in tool_input:
+    if tool_name in ("Grep", "search_files") and "pattern" in tool_input:
         return f"/{tool_input['pattern']}/"
     if tool_name == "Glob" and "pattern" in tool_input:
         return tool_input["pattern"]
