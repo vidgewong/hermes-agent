@@ -610,6 +610,32 @@ def run_conversation(
             should_review_memory=_should_review_memory,
         )
 
+    # Claude Code SDK runtime: delegate the entire turn to a Claude Code
+    # subprocess via claude-agent-sdk. All tool execution happens inside
+    # Claude Code; hermes consumes the structured event stream.
+    if agent.api_mode == "claude_code_sdk":
+        logger.info(
+            "[%s] Dispatching turn to Claude Code SDK runtime (model=%s provider=%s)",
+            getattr(agent, "session_id", "?"),
+            agent.model,
+            agent.provider,
+        )
+        return agent._run_claude_code_sdk_turn(
+            user_message=user_message,
+            original_user_message=original_user_message,
+            messages=messages,
+            effective_task_id=effective_task_id,
+            should_review_memory=_should_review_memory,
+        )
+
+    logger.info(
+        "[%s] Using hermes native loop (api_mode=%s model=%s provider=%s)",
+        getattr(agent, "session_id", "?"),
+        agent.api_mode,
+        agent.model,
+        agent.provider,
+    )
+
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot
         agent._checkpoint_mgr.new_turn()

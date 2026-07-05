@@ -1749,6 +1749,46 @@ class GatewaySlashCommandsMixin:
         prefix = "✓" if result.success else "✗"
         return f"{prefix} {result.message}"
 
+    async def _handle_claude_code_runtime_command(self, event: MessageEvent) -> str:
+        """Handle /claude-code-runtime command in the gateway.
+
+        Same surface as the CLI handler:
+            /claude-code-runtime           — show current state
+            /claude-code-runtime on        — enable Claude Code SDK runtime
+            /claude-code-runtime off       — back to hermes native
+        """
+        from hermes_cli import claude_code_runtime_switch as ccrs
+
+        raw_args = event.get_command_args().strip() if event else ""
+        new_value, errors = ccrs.parse_args(raw_args)
+        if errors:
+            return "❌ " + "\n❌ ".join(errors)
+
+        try:
+            from hermes_cli.config import load_config, save_config
+        except Exception as exc:
+            return f"❌ Could not load config: {exc}"
+        cfg = load_config()
+
+        result = ccrs.apply(
+            cfg,
+            new_value,
+            persist_callback=(save_config if new_value is not None else None),
+        )
+
+        if result.success and new_value is not None and result.requires_new_session:
+            try:
+                session_key = self._session_key_for_source(event.source)
+                self._evict_cached_agent(session_key)
+            except Exception:
+                logger.debug(
+                    "could not evict cached agent after claude-code-runtime change",
+                    exc_info=True,
+                )
+
+        prefix = "✓" if result.success else "✗"
+        return f"{prefix} {result.message}"
+
     async def _handle_personality_command(self, event: MessageEvent) -> str:
         """Handle /personality command - list or set a personality."""
         from gateway.run import _hermes_home, _load_gateway_config

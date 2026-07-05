@@ -360,6 +360,32 @@ def _maybe_apply_codex_app_server_runtime(
     return api_mode
 
 
+def _maybe_apply_claude_code_sdk_runtime(
+    *,
+    provider: str,
+    api_mode: str,
+    model_cfg: Optional[Dict[str, Any]],
+) -> str:
+    """Optional opt-in: rewrite api_mode → "claude_code_sdk" for Anthropic-
+    compatible providers when the user has explicitly enabled that runtime via
+    `model.claude_code_runtime: claude_code_sdk` in config.yaml.
+
+    Default behavior is preserved: when the key is unset, "auto", or empty,
+    this function is a no-op. Only providers that Claude Code SDK supports
+    (anthropic, bedrock, vertex, claude-code) are eligible.
+
+    Returns the (possibly-rewritten) api_mode."""
+    if not model_cfg:
+        return api_mode
+    _COMPATIBLE_PROVIDERS = {"anthropic", "bedrock", "vertex", "claude-code", ""}
+    if provider not in _COMPATIBLE_PROVIDERS:
+        return api_mode
+    runtime = str(model_cfg.get("claude_code_runtime") or "").strip().lower()
+    if runtime == "claude_code_sdk":
+        return "claude_code_sdk"
+    return api_mode
+
+
 def _resolve_runtime_from_pool_entry(
     *,
     provider: str,
@@ -482,6 +508,12 @@ def _resolve_runtime_from_pool_entry(
     # Optional opt-in: route OpenAI/Codex turns through `codex app-server`.
     # Inert when `model.openai_runtime` is unset or "auto".
     api_mode = _maybe_apply_codex_app_server_runtime(
+        provider=provider, api_mode=api_mode, model_cfg=model_cfg
+    )
+
+    # Optional opt-in: route Anthropic turns through Claude Code SDK.
+    # Inert when `model.claude_code_runtime` is unset or "auto".
+    api_mode = _maybe_apply_claude_code_sdk_runtime(
         provider=provider, api_mode=api_mode, model_cfg=model_cfg
     )
 
@@ -1816,9 +1848,12 @@ def resolve_runtime_provider(
                     "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
                     "run 'claude setup-token', or authenticate with 'claude /login'."
                 )
+        _anthropic_api_mode = _maybe_apply_claude_code_sdk_runtime(
+            provider="anthropic", api_mode="anthropic_messages", model_cfg=model_cfg
+        )
         return {
             "provider": "anthropic",
-            "api_mode": "anthropic_messages",
+            "api_mode": _anthropic_api_mode,
             "base_url": base_url,
             "api_key": token,
             "source": "env",
@@ -1893,6 +1928,10 @@ def resolve_runtime_provider(
             }
         if guardrail_config:
             runtime["guardrail_config"] = guardrail_config
+        # Apply Claude Code SDK runtime override if configured
+        runtime["api_mode"] = _maybe_apply_claude_code_sdk_runtime(
+            provider="bedrock", api_mode=runtime["api_mode"], model_cfg=model_cfg
+        )
         return runtime
 
     # API-key providers (z.ai/GLM, Kimi, MiniMax, MiniMax-CN)
