@@ -4694,6 +4694,43 @@ async def update_config(body: ConfigUpdate, profile: Optional[str] = None):
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
+class AgentCoreSwitchBody(BaseModel):
+    agent_core: str  # "native" | "claude_code_sdk" | "codex_app_server"
+
+
+@app.get("/api/agent-core")
+async def get_agent_core():
+    """Return the current agent core runtime setting."""
+    cfg = load_config()
+    model_cfg = cfg.get("model") or {}
+    if isinstance(model_cfg, dict):
+        if model_cfg.get("claude_code_runtime") == "claude_code_sdk":
+            return {"agent_core": "claude_code_sdk"}
+        if model_cfg.get("openai_runtime") == "codex_app_server":
+            return {"agent_core": "codex_app_server"}
+    return {"agent_core": "native"}
+
+
+@app.put("/api/agent-core")
+async def set_agent_core(body: AgentCoreSwitchBody):
+    """Switch the agent core runtime. Only affects new sessions."""
+    cfg = load_config()
+    model_cfg = cfg.get("model") or {}
+    if isinstance(model_cfg, str):
+        model_cfg = {"default": model_cfg}
+    # Reset both
+    model_cfg.pop("claude_code_runtime", None)
+    model_cfg.pop("openai_runtime", None)
+    # Set the requested one
+    if body.agent_core == "claude_code_sdk":
+        model_cfg["claude_code_runtime"] = "claude_code_sdk"
+    elif body.agent_core == "codex_app_server":
+        model_cfg["openai_runtime"] = "codex_app_server"
+    cfg["model"] = model_cfg
+    save_config(cfg)
+    return {"ok": True, "agent_core": body.agent_core}
+
+
 def _catalog_provider_env_metadata() -> dict:
     """Map provider env vars → desktop card metadata, derived from the catalog.
 

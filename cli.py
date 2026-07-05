@@ -3605,7 +3605,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         )
         self._provider_source: Optional[str] = None
         self.provider = self.requested_provider
-        self.api_mode = "chat_completions"
+        # Read configured runtime early so the status bar shows the correct
+        # agent core tag before _setup_agent() runs on first message.
+        _init_model_cfg = CLI_CONFIG.get("model") or {}
+        if isinstance(_init_model_cfg, dict) and _init_model_cfg.get("claude_code_runtime") == "claude_code_sdk":
+            self.api_mode = "claude_code_sdk"
+        elif isinstance(_init_model_cfg, dict) and _init_model_cfg.get("openai_runtime") == "codex_app_server":
+            self.api_mode = "codex_app_server"
+        else:
+            self.api_mode = "chat_completions"
         self.acp_command: Optional[str] = None
         self.acp_args: list[str] = []
         self.base_url = (
@@ -4318,8 +4326,21 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if len(model_short) > 26:
             model_short = f"{model_short[:23]}..."
 
+        # Agent core label — derived from api_mode (which may be a wire
+        # protocol or a runtime override depending on configuration).
+        _rt = getattr(agent, "api_mode", "") if agent else getattr(self, "api_mode", "")
+        if not _rt:
+            _rt = getattr(self, "api_mode", "")
+        if _rt == "claude_code_sdk":
+            agent_core_tag = "cc"
+        elif _rt == "codex_app_server":
+            agent_core_tag = "codex"
+        else:
+            agent_core_tag = "native"
+
         elapsed_seconds = max(0.0, (datetime.now() - self.session_start).total_seconds())
         snapshot = {
+            "agent_core_tag": agent_core_tag,
             "model_name": model_name,
             "model_short": model_short,
             "duration": format_duration_compact(elapsed_seconds),
@@ -4823,14 +4844,18 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             percent_label = f"{percent}%" if percent is not None else "--"
             duration_label = snapshot["duration"]
 
+            # Build model prefix with optional runtime tag
+            rtag = snapshot.get("agent_core_tag", "")
+            model_prefix = f"⚕ [{rtag}] {snapshot['model_short']}" if rtag else f"⚕ {snapshot['model_short']}"
+
             yolo_active = self._is_session_yolo_active()
             if width < 52:
-                text = f"⚕ {snapshot['model_short']} · {duration_label}"
+                text = f"{model_prefix} · {duration_label}"
                 if yolo_active:
                     text += " · ⚠ YOLO"
                 return self._trim_status_bar_text(text, width)
             if width < 76:
-                parts = [f"⚕ {snapshot['model_short']}", percent_label]
+                parts = [model_prefix, percent_label]
                 compressions = snapshot.get("compressions", 0)
                 if compressions:
                     parts.append(f"🗜️ {compressions}")
@@ -4856,7 +4881,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 context_label = "ctx --"
 
             compressions = snapshot.get("compressions", 0)
-            parts = [f"⚕ {snapshot['model_short']}", context_label, percent_label]
+            parts = [model_prefix, context_label, percent_label]
             if compressions:
                 parts.append(f"🗜️ {compressions}")
             bg_count = snapshot.get("active_background_tasks", 0)
@@ -4895,9 +4920,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             duration_label = snapshot["duration"]
             yolo_active = self._is_session_yolo_active()
 
+            # Runtime tag fragments (shown before model name)
+            rtag = snapshot.get("agent_core_tag", "")
+            rtag_frags = [("class:status-bar-dim", f"[{rtag}] ")] if rtag else []
+
             if width < 52:
                 frags = [
                     ("class:status-bar", " ⚕ "),
+                    *rtag_frags,
                     ("class:status-bar-strong", snapshot["model_short"]),
                     ("class:status-bar-dim", " · "),
                     ("class:status-bar-dim", duration_label),
@@ -4916,6 +4946,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     bg_subagent_count = snapshot.get("active_background_subagents", 0)
                     frags = [
                         ("class:status-bar", " ⚕ "),
+                        *rtag_frags,
                         ("class:status-bar-strong", snapshot["model_short"]),
                         ("class:status-bar-dim", " · "),
                         (self._status_bar_context_style(percent), percent_label),
@@ -4955,6 +4986,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     bg_subagent_count = snapshot.get("active_background_subagents", 0)
                     frags = [
                         ("class:status-bar", " ⚕ "),
+                        *rtag_frags,
                         ("class:status-bar-strong", snapshot["model_short"]),
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
@@ -6738,9 +6770,24 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._resumed = False
         _sync_process_session_id(self.session_id)
 
+        # Re-read agent_core from config so external changes (web UI, another
+        # terminal) take effect on the new session.
+        try:
+            from hermes_cli.config import load_config as _load_cfg
+            _fresh_model_cfg = (_load_cfg().get("model") or {})
+            if isinstance(_fresh_model_cfg, dict) and _fresh_model_cfg.get("claude_code_runtime") == "claude_code_sdk":
+                self.api_mode = "claude_code_sdk"
+            elif isinstance(_fresh_model_cfg, dict) and _fresh_model_cfg.get("openai_runtime") == "codex_app_server":
+                self.api_mode = "codex_app_server"
+            else:
+                self.api_mode = "chat_completions"
+        except Exception:
+            pass
+
         if self.agent:
             self.agent.session_id = self.session_id
             self.agent.session_start = self.session_start
+            self.agent.api_mode = self.api_mode
             self.agent.reset_session_state()
             if hasattr(self.agent, "_last_flushed_db_idx"):
                 self.agent._last_flushed_db_idx = 0
@@ -7960,6 +8007,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         for line in result.message.splitlines():
             _cprint(f"  {prefix} {line}" if line.startswith("openai_runtime")
                     else f"    {line}")
+        if result.success and new_value is not None:
+            self.api_mode = new_value if new_value != "auto" else "chat_completions"
+            if self.agent:
+                self.agent.api_mode = self.api_mode
         if result.success and result.requires_new_session:
             _cprint("    Tip: `/reset` starts a new session immediately.")
 
@@ -7998,6 +8049,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         for line in result.message.splitlines():
             _cprint(f"  {prefix} {line}" if line.startswith("claude_code_runtime")
                     else f"    {line}")
+        if result.success and new_value is not None:
+            self.api_mode = new_value if new_value != "auto" else "chat_completions"
+            if self.agent:
+                self.agent.api_mode = self.api_mode
         if result.success and result.requires_new_session:
             _cprint("    Tip: `/reset` starts a new session immediately.")
 
