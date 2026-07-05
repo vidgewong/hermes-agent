@@ -1,45 +1,56 @@
-"""Hermes-tools-as-MCP server for the codex_app_server runtime.
+"""Hermes-tools-as-MCP server for the codex_app_server / claude_code_sdk runtimes.
 
-When the user runs `openai/*` turns through the codex app-server, codex
-owns the loop and builds its own tool list. By default, that means
-Hermes' richer tool surface — web search, browser automation,
-delegate_task subagents, vision analysis, persistent memory, skills,
-cross-session search, image generation, TTS — is unreachable.
+When the user runs turns through an external runtime (Codex app-server or
+Claude Code SDK), that runtime owns the tool loop. By default, Hermes' richer
+tool surface — web search, browser automation, vision, persistent memory,
+skills, cross-session search, image generation, TTS — is unreachable.
 
-This module exposes a curated subset of those Hermes tools to the
-spawned codex subprocess via stdio MCP. Codex registers it as a normal
-MCP server (per `~/.codex/config.toml [mcp_servers.hermes-tools]`) and
-the user gets full Hermes capability inside a Codex turn.
+This module exposes a curated subset of those Hermes tools to the spawned
+subprocess via stdio MCP, so both runtimes gain full Hermes capability.
 
 Scope (what we expose):
-  - web_search, web_extract              — Firecrawl, no codex equivalent
+  For the claude_code_sdk runtime this is the COMPLETE tool surface —
+  Claude Code built-ins (Bash, Read, Write, Edit, Glob, Grep, CronCreate,
+  Agent, Workflow, …) are disabled; everything routes through here so
+  Hermes' approval guards, secret redaction, and rate limiting apply.
+
+  - terminal                             — shell command execution (replaces Bash)
+  - read_file, write_file, patch,        — file I/O (replaces Read/Write/Edit/Glob/Grep)
+    search_files
+  - cronjob                              — cron scheduling (replaces CronCreate/etc.)
+  - web_search, web_extract              — Firecrawl
   - browser_navigate / _click / _type /  — Camofox/Browserbase automation
     _snapshot / _scroll / _back / _press /
     _get_images / _console / _vision
   - vision_analyze                       — image inspection by vision model
   - image_generate                       — image generation
-  - skill_view, skills_list              — Hermes' skill library
+  - skill_view, skills_list,             — Hermes' skill library
+    skill_manage
   - text_to_speech                       — TTS
+  - memory                               — read/write ~/.hermes/memories/MEMORY.md
+                                           (stateful: MCP server holds a
+                                           MemoryStore instance backed by the
+                                           same files Hermes native uses)
+  - todo                                 — read/write TodoStore (per-process,
+                                           survives within one MCP server lifetime)
+  - session_search                       — search past Hermes sessions via
+                                           SessionDB (file-backed, no agent
+                                           context needed)
   - kanban_* (complete/block/comment/    — kanban worker + orchestrator
     heartbeat/show/list/create/            handoff (stateless: read env var,
     unblock/link)                          write ~/.hermes/kanban.db)
 
 What we DO NOT expose:
-  - terminal / shell                     — codex's own shell tool
-  - read_file / write_file / patch       — codex's apply_patch + shell
-  - search_files / process               — codex's shell
-  - clarify                              — codex's own UX
-  - delegate_task / memory /             — `_AGENT_LOOP_TOOLS` in Hermes
-    session_search / todo                  (model_tools.py). They require
-                                           the running AIAgent context to
-                                           dispatch (mid-loop state), so a
-                                           stateless MCP callback can't
-                                           drive them. See the inline
-                                           comment on EXPOSED_TOOLS below.
+  - clarify                              — external runtime's own UX
+  - delegate_task                        — requires a live AIAgent instance
+                                           (gateway session routing,
+                                           _delegate_depth, background result
+                                           delivery). Cannot be reconstructed
+                                           in a stateless MCP subprocess.
 
 Run with: python -m agent.transports.hermes_tools_mcp_server
-Spawned by: CodexAppServerSession.ensure_started() when the runtime is
-            active and config opts in.
+Spawned by: CodexAppServerSession / claude_code_sdk_runtime when the runtime
+            is active and the mcp package is installed.
 """
 
 from __future__ import annotations
@@ -53,56 +64,217 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 
-# Tools we expose. Each name MUST match a registered Hermes tool that
-# `model_tools.handle_function_call()` can dispatch.
+# Tools that must NOT be exposed via MCP — everything else is auto-exposed.
 #
-# What we deliberately DO NOT expose:
-#   - terminal / shell / read_file / write_file / patch / search_files /
-#     process — codex's built-ins cover these and approval routes through
-#     codex's own UI.
-#   - delegate_task / memory / session_search / todo — these are
-#     `_AGENT_LOOP_TOOLS` in Hermes (model_tools.py:493). They require
-#     the running AIAgent context to dispatch (mid-loop state), so a
-#     stateless MCP callback can't drive them. Hermes' default runtime
-#     keeps these working; the codex_app_server runtime cannot.
-EXPOSED_TOOLS: tuple[str, ...] = (
-    "web_search",
-    "web_extract",
-    "browser_navigate",
-    "browser_click",
-    "browser_type",
-    "browser_press",
-    "browser_snapshot",
-    "browser_scroll",
-    "browser_back",
-    "browser_get_images",
-    "browser_console",
-    "browser_vision",
-    "vision_analyze",
-    "image_generate",
-    "skill_view",
-    "skills_list",
-    "text_to_speech",
-    # Kanban worker handoff tools — gated on HERMES_KANBAN_TASK env var
-    # (set by the kanban dispatcher when spawning a worker). Without these
-    # in the callback, a worker spawned with openai_runtime=codex_app_server
-    # could do the work but couldn't report completion back to the kernel,
-    # making it hang until timeout. Stateless dispatch — they just read
-    # the env var and write to ~/.hermes/kanban.db.
-    "kanban_complete",
-    "kanban_block",
-    "kanban_comment",
-    "kanban_heartbeat",
-    "kanban_show",
-    "kanban_list",
-    # NOTE: kanban_create / kanban_unblock / kanban_link are orchestrator-
-    # only — the kanban tool gates them on HERMES_KANBAN_TASK being unset.
-    # They're exposed here for orchestrator agents running on the codex
-    # runtime that need to dispatch new tasks.
-    "kanban_create",
-    "kanban_unblock",
-    "kanban_link",
-)
+# New Hermes tools are automatically picked up without touching this file;
+# only add to this blocklist when a tool genuinely cannot work in a
+# stateless MCP subprocess.
+#
+# memory / todo / session_search are handled separately by _build_memory_tools()
+# (they need their own store instances) so they are excluded from the
+# auto-dispatch loop below but still end up registered.
+_BLOCKED_TOOLS: frozenset[str] = frozenset({
+    # Requires a live AIAgent instance (gateway session routing,
+    # _delegate_depth tracking, background result delivery).
+    "delegate_task",
+    # Needs the terminal environment manager tied to the AIAgent's session.
+    "read_terminal",
+    "close_terminal",
+    # Requires desktop/GUI access — not available in an MCP subprocess.
+    "computer_use",
+    # Interactive UX — has no meaning inside a headless MCP process.
+    "clarify",
+    # Handled by _build_memory_tools() with dedicated store instances.
+    "memory",
+    "todo",
+    "session_search",
+})
+
+
+def _register_tool(mcp: Any, handler: Any, name: str, description: str, params_schema: dict) -> bool:
+    """Register a tool on *mcp* using the Hermes JSON schema.
+
+    Uses FastMCP internals to inject the authoritative Hermes parameter schema
+    directly, bypassing FastMCP's signature-inspection which would wrap all
+    arguments inside a single 'kwargs' field for **kwargs handlers.
+
+    Returns True on success, False if the fast-path fails (falls back to
+    mcp.add_tool which uses the broken **kwargs inference).
+    """
+    try:
+        from mcp.server.fastmcp.tools.base import Tool as _MCPTool
+        from mcp.server.fastmcp.utilities.func_metadata import (
+            ArgModelBase as _ArgModelBase,
+            FuncMetadata as _FuncMetadata,
+        )
+        from pydantic import create_model as _create_model
+        from pydantic.config import ConfigDict as _ConfigDict
+
+        class _PassthroughArgModel(_ArgModelBase):
+            model_config = _ConfigDict(extra="allow")
+
+            def model_dump_one_level(self):
+                return dict(self.__pydantic_extra__ or {})
+
+        tool_obj = _MCPTool(
+            fn=handler,
+            name=name,
+            description=description,
+            parameters=params_schema,
+            fn_metadata=_FuncMetadata(arg_model=_PassthroughArgModel),
+            is_async=False,
+            context_kwarg=None,
+        )
+        mcp._tool_manager._tools[name] = tool_obj
+        return True
+    except Exception as exc:
+        logger.debug("direct Tool injection failed for %s: %s", name, exc)
+        try:
+            mcp.add_tool(handler, name=name, description=description)
+            return True
+        except Exception as exc2:
+            logger.warning("failed to register tool %s: %s", name, exc2)
+            return False
+
+
+def _build_memory_tools(mcp: Any) -> None:
+    """Register memory / todo / session_search as stateful MCP tools.
+
+    These are _AGENT_LOOP_TOOLS in Hermes native (dispatched by the agent loop
+    with live AIAgent state). Here we reconstruct the minimal dependencies each
+    tool actually needs — all three are backed by files/SQLite and need no
+    AIAgent instance at all.
+    """
+    # ── memory ──────────────────────────────────────────────────────────────
+    # MemoryStore is pure file I/O on ~/.hermes/memories/MEMORY.md + USER.md.
+    # One instance per MCP server process is correct: the file lock inside
+    # MemoryStore serialises concurrent writes, and load_from_disk() is called
+    # once at startup so the in-memory snapshot is stable.
+    try:
+        from tools.memory_tool import MemoryStore, memory_tool as _memory_tool_fn
+        _store = MemoryStore()
+        _store.load_from_disk()
+
+        # Pull schema from the Hermes tool registry so the MCP client sees
+        # the correct parameter descriptions (same fix as EXPOSED_TOOLS loop).
+        try:
+            from model_tools import get_tool_definitions as _gtd
+            _mem_spec = next(
+                (td["function"] for td in (_gtd(quiet_mode=True) or [])
+                 if isinstance(td, dict) and td.get("function", {}).get("name") == "memory"),
+                None,
+            )
+            _mem_schema = (_mem_spec or {}).get("parameters") or {"type": "object", "properties": {}}
+            _mem_desc = (_mem_spec or {}).get("description") or (
+                "Read or write Hermes persistent memory (MEMORY.md / USER.md). "
+                "Actions: add, replace, remove, list. "
+                "Target: 'memory' (agent notes) or 'user' (user profile)."
+            )
+        except Exception:
+            _mem_schema = {"type": "object", "properties": {}}
+            _mem_desc = (
+                "Read or write Hermes persistent memory (MEMORY.md / USER.md). "
+                "Actions: add, replace, remove, list. "
+                "Target: 'memory' (agent notes) or 'user' (user profile)."
+            )
+
+        def _memory_handler(**kwargs: Any) -> str:
+            try:
+                return _memory_tool_fn(store=_store, **kwargs)
+            except Exception as exc:
+                logger.exception("memory tool raised")
+                return json.dumps({"error": str(exc)})
+
+        if _register_tool(mcp, _memory_handler, "memory", _mem_desc, _mem_schema):
+            logger.info("hermes-tools MCP: registered memory tool")
+        else:
+            logger.warning("hermes-tools MCP: could not register memory tool")
+    except Exception as exc:
+        logger.warning("hermes-tools MCP: could not register memory tool: %s", exc)
+
+    # ── todo ────────────────────────────────────────────────────────────────
+    # TodoStore is in-memory within one MCP server lifetime.  Since the MCP
+    # server process is long-lived (one per ClaudeCodeSession), todos persist
+    # across turns in the same session — matching Hermes native behaviour.
+    try:
+        from tools.todo_tool import TodoStore, todo_tool as _todo_tool_fn
+        _todo_store = TodoStore()
+
+        try:
+            from model_tools import get_tool_definitions as _gtd
+            _todo_spec = next(
+                (td["function"] for td in (_gtd(quiet_mode=True) or [])
+                 if isinstance(td, dict) and td.get("function", {}).get("name") == "todo"),
+                None,
+            )
+            _todo_schema = (_todo_spec or {}).get("parameters") or {"type": "object", "properties": {}}
+            _todo_desc = (_todo_spec or {}).get("description") or (
+                "Read or write the in-session task list (todos). "
+                "Pass todos=[...] to write; omit to read current list. "
+                "Pass merge=true to update by id instead of replacing."
+            )
+        except Exception:
+            _todo_schema = {"type": "object", "properties": {}}
+            _todo_desc = (
+                "Read or write the in-session task list (todos). "
+                "Pass todos=[...] to write; omit to read current list. "
+                "Pass merge=true to update by id instead of replacing."
+            )
+
+        def _todo_handler(**kwargs: Any) -> str:
+            try:
+                return _todo_tool_fn(store=_todo_store, **kwargs)
+            except Exception as exc:
+                logger.exception("todo tool raised")
+                return json.dumps({"error": str(exc)})
+
+        if _register_tool(mcp, _todo_handler, "todo", _todo_desc, _todo_schema):
+            logger.info("hermes-tools MCP: registered todo tool")
+        else:
+            logger.warning("hermes-tools MCP: could not register todo tool")
+    except Exception as exc:
+        logger.warning("hermes-tools MCP: could not register todo tool: %s", exc)
+
+    # ── session_search ───────────────────────────────────────────────────────
+    # session_search() already opens SessionDB itself when db=None.  No
+    # agent context required — we just call through directly.
+    try:
+        from tools.session_search_tool import session_search as _session_search_fn
+
+        try:
+            from model_tools import get_tool_definitions as _gtd
+            _ss_spec = next(
+                (td["function"] for td in (_gtd(quiet_mode=True) or [])
+                 if isinstance(td, dict) and td.get("function", {}).get("name") == "session_search"),
+                None,
+            )
+            _ss_schema = (_ss_spec or {}).get("parameters") or {"type": "object", "properties": {}}
+            _ss_desc = (_ss_spec or {}).get("description") or (
+                "Search or browse past Hermes conversation sessions stored in "
+                "the local SessionDB. Pass query= for semantic search, "
+                "session_id= to read a specific session, or nothing to browse."
+            )
+        except Exception:
+            _ss_schema = {"type": "object", "properties": {}}
+            _ss_desc = (
+                "Search or browse past Hermes conversation sessions stored in "
+                "the local SessionDB. Pass query= for semantic search, "
+                "session_id= to read a specific session, or nothing to browse."
+            )
+
+        def _session_search_handler(**kwargs: Any) -> str:
+            try:
+                return _session_search_fn(**kwargs)
+            except Exception as exc:
+                logger.exception("session_search tool raised")
+                return json.dumps({"error": str(exc)})
+
+        if _register_tool(mcp, _session_search_handler, "session_search", _ss_desc, _ss_schema):
+            logger.info("hermes-tools MCP: registered session_search tool")
+        else:
+            logger.warning("hermes-tools MCP: could not register session_search tool")
+    except Exception as exc:
+        logger.warning("hermes-tools MCP: could not register session_search tool: %s", exc)
 
 
 def _build_server() -> Any:
@@ -125,11 +297,16 @@ def _build_server() -> Any:
     mcp = FastMCP(
         "hermes-tools",
         instructions=(
-            "Hermes Agent's tool surface, exposed for use inside a Codex "
-            "session. Use these for capabilities Codex's built-in toolset "
-            "doesn't cover: web search/extract, browser automation, "
-            "subagent delegation, vision, image generation, persistent "
-            "memory, skills, and cross-session search."
+            "Hermes Agent's complete tool surface. When running under the "
+            "Claude Code SDK backend, ALL tool execution routes through this "
+            "MCP server — including shell commands (terminal), file I/O "
+            "(read_file, write_file, patch, search_files), cron scheduling "
+            "(cronjob), web search/extract, browser automation, vision, image "
+            "generation, persistent memory (memory), in-session task tracking "
+            "(todo), past-session search (session_search), and the Hermes "
+            "skill library. Do NOT use Claude Code built-in tools (Bash, Read, "
+            "Write, Edit, Glob, Grep, Agent, Workflow, CronCreate, etc.) — "
+            "use the Hermes equivalents provided here instead."
         ),
     )
 
@@ -143,22 +320,13 @@ def _build_server() -> Any:
 
     exposed_count = 0
 
-    for name in EXPOSED_TOOLS:
-        spec = all_defs.get(name)
-        if spec is None:
-            logger.debug(
-                "skipping %s — not registered in this Hermes process", name
-            )
+    for name, spec in all_defs.items():
+        if name in _BLOCKED_TOOLS:
             continue
 
         description = spec.get("description") or f"Hermes {name} tool"
         params_schema = spec.get("parameters") or {"type": "object", "properties": {}}
 
-        # FastMCP wants a Python callable. Build a closure that takes the
-        # arguments dict, dispatches via handle_function_call, and returns
-        # the result string. We use add_tool() for full control over the
-        # input schema (FastMCP's @tool() decorator inspects type hints,
-        # which we can't get from a JSON schema at runtime).
         def _make_handler(tool_name: str):
             def _dispatch(**kwargs: Any) -> str:
                 try:
@@ -167,30 +335,21 @@ def _build_server() -> Any:
                     logger.exception("tool %s raised", tool_name)
                     return json.dumps({"error": str(exc), "tool": tool_name})
             _dispatch.__name__ = tool_name
-            _dispatch.__doc__ = description
             return _dispatch
 
-        try:
-            mcp.add_tool(
-                _make_handler(name),
-                name=name,
-                description=description,
-                # FastMCP accepts JSON schema directly via the
-                # input_schema parameter on newer versions; older
-                # versions use parameters_schema. Try both for compat.
-            )
-        except TypeError:
-            # Older mcp SDK signature — fall back to decorator-style.
-            handler = _make_handler(name)
-            handler = mcp.tool(name=name, description=description)(handler)
-
-        exposed_count += 1
+        if _register_tool(mcp, _make_handler(name), name, description, params_schema):
+            exposed_count += 1
 
     logger.info(
-        "hermes-tools MCP server registered %d/%d tools",
+        "hermes-tools MCP server registered %d stateless tools (%d blocked)",
         exposed_count,
-        len(EXPOSED_TOOLS),
+        len([n for n in all_defs if n in _BLOCKED_TOOLS]),
     )
+
+    # Register stateful tools (memory, todo, session_search) that own their
+    # own store/db instances — no AIAgent context required.
+    _build_memory_tools(mcp)
+
     return mcp
 
 
@@ -205,6 +364,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         stream=sys.stderr,  # MCP uses stdio for protocol — logs MUST go to stderr
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
+    # tools.registry emits WARNING for every tool whose check_fn returns False
+    # (missing API key, no kanban task, etc.). These are expected in the MCP
+    # subprocess environment and would flood the parent process log on every
+    # turn. Suppress them here; they still show in the main Hermes process.
+    logging.getLogger("tools.registry").setLevel(logging.ERROR)
 
     # Quiet mode: keep Hermes' own banners off stdout (which is the MCP wire).
     os.environ.setdefault("HERMES_QUIET", "1")

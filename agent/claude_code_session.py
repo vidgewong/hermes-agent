@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 
+
 @dataclass
 class ClaudeCodeTurnResult:
     """Hermes-normalized result from one Claude Code SDK turn."""
@@ -48,6 +49,7 @@ class ClaudeCodeSession:
         mcp_servers: dict[str, Any] | None = None,
         max_turns: int | None = None,
         extra_env: dict[str, str] | None = None,
+        resume: str | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         on_stream_delta: Callable[[str], None] | None = None,
     ):
@@ -59,6 +61,7 @@ class ClaudeCodeSession:
         self._mcp_servers = mcp_servers
         self._max_turns = max_turns
         self._extra_env = extra_env or {}
+        self._resume = resume
         self._on_event = on_event
         self._on_stream_delta = on_stream_delta
         self._client = None
@@ -112,33 +115,88 @@ class ClaudeCodeSession:
         if "ANTHROPIC_MODEL" not in env:
             sdk_model = provider_config.model or self._model
 
+        # Use Claude Code's default system prompt as the base and append
+        # Hermes' platform instructions (MEDIA: tags, messaging conventions,
+        # skills index, memory, etc.) on top. This preserves Claude Code's
+        # built-in tool behaviour while adding Hermes-specific guidance.
+        # Passing a raw string as system_prompt would replace the default
+        # entirely, causing Claude to lose file-delivery conventions.
+        _sdk_system_prompt = (
+            {"type": "preset", "preset": "claude_code", "append": self._system_prompt}
+            if self._system_prompt
+            else None
+        )
+
+        # Block all Claude Code built-in tools so every tool call routes through
+        # the hermes-tools MCP server instead. Claude Code's --allowedTools does
+        # NOT filter MCP tools (they are always accessible when an MCP server is
+        # connected), but --disallowedTools DOES block built-ins. We use this to
+        # push shell, file, cron, and web operations through Hermes' own layer
+        # (approval guards, secret redaction, rate limiting, cronjob scheduler).
+        # MCP tools from the hermes-tools server are implicitly allowed because
+        # they are not built-ins and therefore not subject to disallowedTools.
+        _builtin_tools_to_block = [
+            # Shell / file — replaced by terminal, read_file, write_file, patch, search_files
+            "Bash", "Read", "Write", "Edit", "Glob", "Grep",
+            # Agents / workflows — not needed; Hermes handles orchestration
+            "Agent", "Workflow",
+            # Web — replaced by hermes web_search / web_extract
+            "WebFetch",
+            # Deferred built-ins — all replaced by hermes equivalents
+            "CronCreate", "CronDelete", "CronList", "ScheduleWakeup",
+            "TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate",
+            "SendMessage", "EnterWorktree", "ExitWorktree",
+            "LSP", "NotebookEdit", "ToolSearch",
+            # Other built-ins not needed
+            "ReportFindings",
+            # Block Claude Code's built-in Skill tool — it only searches
+            # ~/.claude/skills/ and knows nothing about ~/.hermes/skills/.
+            # Hermes skills are accessible via mcp__hermes-tools__skill_view,
+            # skills_list, and skill_manage instead.
+            "Skill",
+        ]
         options = ClaudeAgentOptions(
             model=sdk_model,
-            system_prompt=self._system_prompt,
+            system_prompt=_sdk_system_prompt,
             cwd=self._cwd,
             permission_mode="bypassPermissions",
-            allowed_tools=self._allowed_tools or [
-                "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-                "Agent", "Workflow", "WebFetch", "ToolSearch",
-                "LSP", "NotebookEdit",
-            ],
+            allowed_tools=self._allowed_tools or [],
+            disallowed_tools=_builtin_tools_to_block,
             mcp_servers=self._mcp_servers,
             max_turns=self._max_turns,
+            resume=self._resume,
             include_partial_messages=True,
             include_hook_events=True,
             env=env,
             extra_args=provider_config.extra_args,
             cli_path=system_cli,
+            # Default 1MB is too small when MCP tool results contain large
+            # payloads (vision analysis errors, file contents, etc.).
+            max_buffer_size=16 * 1024 * 1024,  # 16MB
         )
 
         self._client = ClaudeSDKClient(options=options)
         await self._client.connect()
         return self._client
 
-    async def run_turn(self, user_input: str) -> ClaudeCodeTurnResult:
+    async def run_turn(self, user_input: str | list) -> ClaudeCodeTurnResult:
         """Run one conversational turn, consuming all events."""
         client = await self._ensure_client()
-        await client.query(user_input)
+
+        # Multimodal content (images, files) arrives as a list of content blocks.
+        # The SDK client.query() accepts AsyncIterable[dict] for this case —
+        # wrap the list in a single message dict and stream it.
+        if isinstance(user_input, list):
+            async def _multimodal_iter():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": user_input},
+                    "parent_tool_use_id": None,
+                    "session_id": "default",
+                }
+            await client.query(_multimodal_iter())
+        else:
+            await client.query(user_input)
 
         projected_messages: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
