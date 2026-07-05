@@ -3204,9 +3204,17 @@ def _session_info(agent, session: dict | None = None) -> dict:
         yolo = bool(_YOLO_MODE_FROZEN) or session_yolo or _get_approval_mode() == "off"
     except Exception:
         yolo = False
+    _api_mode = getattr(agent, "api_mode", "")
+    if _api_mode == "claude_code_sdk":
+        agent_core = "claude_code_sdk"
+    elif _api_mode == "codex_app_server":
+        agent_core = "codex_app_server"
+    else:
+        agent_core = "native"
     info: dict = {
         "model": getattr(agent, "model", ""),
         "provider": getattr(agent, "provider", ""),
+        "agent_core": agent_core,
         "reasoning_effort": reasoning_effort,
         "service_tier": service_tier,
         "fast": service_tier == "priority",

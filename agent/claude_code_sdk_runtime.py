@@ -45,28 +45,44 @@ def run_claude_code_sdk_turn(
         # Uses the same callback interfaces the native loop uses so the CLI/TUI
         # renders tool progress identically.
         _last_tool_name = []  # mutable container for closure
+        _last_tool_id = []  # track tool_call_id for complete callback
+        _last_tool_args = []  # track args for complete callback
 
         def _on_event(event: dict) -> None:
             progress_callback = getattr(agent, "tool_progress_callback", None)
+            start_callback = getattr(agent, "tool_start_callback", None)
+            complete_callback = getattr(agent, "tool_complete_callback", None)
             _quiet = getattr(agent, "quiet_mode", False)
 
             if event.get("type") == "assistant":
                 for block in event.get("blocks", []):
                     if block.get("type") == "tool_use":
                         tool_name = block.get("name", "")
+                        tool_id = block.get("id", "") or f"cc_{id(block)}"
                         tool_input = block.get("input", {})
                         if isinstance(tool_input, dict):
                             preview = _build_tool_preview(tool_name, tool_input)
                         else:
                             preview = str(tool_input)[:100]
-                        # Track for tool.completed
                         _last_tool_name.clear()
                         _last_tool_name.append(tool_name)
-                        # Fire tool_progress_callback — this drives the CLI TUI
-                        logger.info(
-                            "Claude Code SDK tool.started: %s preview=%s has_callback=%s",
-                            tool_name, preview[:50], bool(progress_callback),
-                        )
+                        _last_tool_id.clear()
+                        _last_tool_id.append(tool_id)
+                        _last_tool_args.clear()
+                        _last_tool_args.append(tool_input if isinstance(tool_input, dict) else {})
+
+                        # Fire tool_start_callback — the TUI gateway uses this
+                        # to emit tool.start WS events (tool_progress_callback's
+                        # tool.started is intentionally skipped there).
+                        if start_callback:
+                            try:
+                                start_callback(
+                                    tool_id, tool_name,
+                                    tool_input if isinstance(tool_input, dict) else {},
+                                )
+                            except Exception:
+                                logger.debug("tool_start_callback raised", exc_info=True)
+
                         if progress_callback:
                             try:
                                 progress_callback(
@@ -75,7 +91,6 @@ def run_claude_code_sdk_turn(
                                 )
                             except Exception:
                                 logger.exception("tool_progress_callback raised")
-                        # Also emit via status for non-streaming CLI
                         if not _quiet:
                             try:
                                 agent._emit_status(f"🔧 {tool_name}: {preview}")
@@ -93,8 +108,21 @@ def run_claude_code_sdk_turn(
             elif event.get("type") == "tool_result":
                 content = event.get("content", "")
                 is_error = event.get("is_error", False)
-                # Fire tool.completed with the last tool name for TUI rendering
                 last_tool = _last_tool_name[0] if _last_tool_name else ""
+                last_id = _last_tool_id[0] if _last_tool_id else ""
+                last_args = _last_tool_args[0] if _last_tool_args else {}
+
+                # Fire tool_complete_callback — produces tool.complete WS event
+                if complete_callback:
+                    try:
+                        complete_callback(
+                            last_id, last_tool,
+                            last_args,
+                            content[:2000] if content else "",
+                        )
+                    except Exception:
+                        logger.debug("tool_complete_callback raised", exc_info=True)
+
                 if progress_callback:
                     try:
                         progress_callback(
@@ -104,7 +132,6 @@ def run_claude_code_sdk_turn(
                         )
                     except Exception:
                         pass
-                # Also emit status
                 if not _quiet and content:
                     try:
                         display = content[:200]
@@ -115,21 +142,12 @@ def run_claude_code_sdk_turn(
                     except Exception:
                         pass
 
-        # Bridge streaming text to hermes' stream_delta_callback.
-        # Even when streaming is disabled in config, we use _emit_status
-        # to show progress.
-        stream_callbacks = [
-            cb
+        def _on_stream_delta(text: str) -> None:
             for cb in (
                 getattr(agent, "stream_delta_callback", None),
                 getattr(agent, "_stream_callback", None),
-            )
-            if cb is not None
-        ]
-
-        def _on_stream_delta(text: str) -> None:
-            if stream_callbacks:
-                for cb in stream_callbacks:
+            ):
+                if cb is not None:
                     try:
                         cb(text)
                     except Exception:
@@ -142,7 +160,7 @@ def run_claude_code_sdk_turn(
             system_prompt=getattr(agent, "active_system_prompt", None),
             max_turns=agent.max_iterations,
             on_event=_on_event,
-            on_stream_delta=_on_stream_delta if stream_callbacks else None,
+            on_stream_delta=_on_stream_delta,
         )
 
     # Run the turn — bridge async SDK into the synchronous conversation_loop.

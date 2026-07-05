@@ -403,6 +403,7 @@ export function GoodVibesHeart({ tick, t }: { tick: number; t: Theme }) {
 }
 
 export function StatusRule({
+  agentCore,
   cwdLabel,
   cols,
   busy,
@@ -438,7 +439,8 @@ export function StatusRule({
       : ''
 
   const bar = !segs.compactCtx && usage.context_max ? ctxBar(pct) : ''
-  const modelText = modelLabel(model, modelReasoningEffort, modelFast)
+  const runtimeTag = agentCore === 'claude_code_sdk' ? '[cc] ' : agentCore === 'codex_app_server' ? '[codex] ' : ''
+  const modelText = runtimeTag + modelLabel(model, modelReasoningEffort, modelFast)
 
   // A credits notice replaces the status/verb slot, but only when idle —
   // while busy the FaceTicker always wins (R1 render priority). The notice
@@ -770,6 +772,7 @@ export function TranscriptScrollbar({ scrollRef, t }: TranscriptScrollbarProps) 
 }
 
 interface StatusRuleProps {
+  agentCore?: string
   bgCount: number
   lastTurnEndedAt?: null | number
   liveSessionCount: number

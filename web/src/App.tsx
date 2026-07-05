@@ -93,6 +93,7 @@ import WebhooksPage from "@/pages/WebhooksPage";
 import SystemPage from "@/pages/SystemPage";
 import ChatPage from "@/pages/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { RuntimeSwitcher } from "@/components/RuntimeSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
 import type { Translations } from "@/i18n/types";
@@ -694,6 +695,14 @@ export default function App() {
                 )}
               >
                 <PluginSlot name="header-right" />
+
+                <SidebarIconWithTooltip
+                  collapsed={isDesktopCollapsed}
+                  label="Agent Core"
+                  tooltipWarmRef={tooltipWarmRef}
+                >
+                  <RuntimeSwitcher collapsed={isDesktopCollapsed} dropUp />
+                </SidebarIconWithTooltip>
 
                 <SidebarIconWithTooltip
                   collapsed={isDesktopCollapsed}
