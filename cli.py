@@ -8317,6 +8317,44 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if result.success and result.requires_new_session:
             _cprint("    Tip: `/reset` starts a new session immediately.")
 
+    def _handle_claude_code_runtime(self, cmd_original: str) -> None:
+        """Handle /claude-code-runtime — toggle Claude Code SDK runtime.
+
+        Usage:
+            /claude-code-runtime                   — show current state
+            /claude-code-runtime on                — enable SDK runtime
+            /claude-code-runtime off               — back to hermes native
+        """
+        from hermes_cli import claude_code_runtime_switch as ccrs
+
+        parts = cmd_original.split(None, 1)
+        raw_args = parts[1].strip() if len(parts) > 1 else ""
+        new_value, errors = ccrs.parse_args(raw_args)
+        if errors:
+            for err in errors:
+                _cprint(f"❌ {err}")
+            return
+
+        try:
+            from hermes_cli.config import load_config, save_config
+        except Exception as exc:
+            _cprint(f"❌ could not load config: {exc}")
+            return
+        cfg = load_config()
+
+        result = ccrs.apply(
+            cfg,
+            new_value,
+            persist_callback=(save_config if new_value is not None else None),
+        )
+
+        prefix = "✓" if result.success else "✗"
+        for line in result.message.splitlines():
+            _cprint(f"  {prefix} {line}" if line.startswith("claude_code_runtime")
+                    else f"    {line}")
+        if result.success and result.requires_new_session:
+            _cprint("    Tip: `/reset` starts a new session immediately.")
+
     def _should_handle_model_command_inline(self, text: str, has_images: bool = False) -> bool:
         """Return True when /model should be handled immediately on the UI thread."""
         if not text or has_images or not _looks_like_slash_command(text):

@@ -106,6 +106,9 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
     # OpenAI-compatible endpoint. Only loaded when provider=vertex is selected;
     # google-auth is NOT in [all] so plain installs don't carry it.
     "provider.vertex": ("google-auth==2.55.1",),
+    # Claude Code SDK — needed when claude_code_runtime=claude_code_sdk.
+    # Wraps the Claude Code CLI subprocess for structured event streaming.
+    "runtime.claude_code_sdk": ("claude-agent-sdk>=0.1.0",),
     # Microsoft Foundry — Entra ID auth (managed identity, workload identity,
     # service principal, az login, VS Code, azd, PowerShell). Only loaded
     # when model.auth_mode=entra_id is selected; key-based azure-foundry
