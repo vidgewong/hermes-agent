@@ -1,56 +1,16 @@
-"""Hermes-tools-as-MCP server for the codex_app_server / claude_code_sdk runtimes.
+"""Hermes-tools-as-MCP server — STANDALONE MODE ONLY.
 
-When the user runs turns through an external runtime (Codex app-server or
-Claude Code SDK), that runtime owns the tool loop. By default, Hermes' richer
-tool surface — web search, browser automation, vision, persistent memory,
-skills, cross-session search, image generation, TTS — is unreachable.
+.. deprecated::
+    The Claude Code SDK runtime now uses in-process MCP (agent/in_process_mcp.py)
+    instead of spawning this as a subprocess. This module is retained for
+    standalone/external-client use only (e.g., connecting external MCP clients
+    to Hermes tools via stdio).
 
-This module exposes a curated subset of those Hermes tools to the spawned
-subprocess via stdio MCP, so both runtimes gain full Hermes capability.
-
-Scope (what we expose):
-  For the claude_code_sdk runtime this is the COMPLETE tool surface —
-  Claude Code built-ins (Bash, Read, Write, Edit, Glob, Grep, CronCreate,
-  Agent, Workflow, …) are disabled; everything routes through here so
-  Hermes' approval guards, secret redaction, and rate limiting apply.
-
-  - terminal                             — shell command execution (replaces Bash)
-  - read_file, write_file, patch,        — file I/O (replaces Read/Write/Edit/Glob/Grep)
-    search_files
-  - cronjob                              — cron scheduling (replaces CronCreate/etc.)
-  - web_search, web_extract              — Firecrawl
-  - browser_navigate / _click / _type /  — Camofox/Browserbase automation
-    _snapshot / _scroll / _back / _press /
-    _get_images / _console / _vision
-  - vision_analyze                       — image inspection by vision model
-  - image_generate                       — image generation
-  - skill_view, skills_list,             — Hermes' skill library
-    skill_manage
-  - text_to_speech                       — TTS
-  - memory                               — read/write ~/.hermes/memories/MEMORY.md
-                                           (stateful: MCP server holds a
-                                           MemoryStore instance backed by the
-                                           same files Hermes native uses)
-  - todo                                 — read/write TodoStore (per-process,
-                                           survives within one MCP server lifetime)
-  - session_search                       — search past Hermes sessions via
-                                           SessionDB (file-backed, no agent
-                                           context needed)
-  - kanban_* (complete/block/comment/    — kanban worker + orchestrator
-    heartbeat/show/list/create/            handoff (stateless: read env var,
-    unblock/link)                          write ~/.hermes/kanban.db)
-
-What we DO NOT expose:
-  - clarify                              — external runtime's own UX
-  - delegate_task                        — requires a live AIAgent instance
-                                           (gateway session routing,
-                                           _delegate_depth, background result
-                                           delivery). Cannot be reconstructed
-                                           in a stateless MCP subprocess.
+When running as a standalone process, this module exposes Hermes tools via
+stdio MCP so external clients can call web_search, browser_*, vision, memory,
+skills, etc.
 
 Run with: python -m agent.transports.hermes_tools_mcp_server
-Spawned by: CodexAppServerSession / claude_code_sdk_runtime when the runtime
-            is active and the mcp package is installed.
 """
 
 from __future__ import annotations
