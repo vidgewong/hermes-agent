@@ -4550,7 +4550,11 @@ class AIAgent:
         if getattr(self, "provider", None) == "bedrock":
             from agent.anthropic_adapter import build_anthropic_bedrock_client
             region = getattr(self, "_bedrock_region", "us-east-1") or "us-east-1"
-            self._anthropic_client = build_anthropic_bedrock_client(region)
+            self._anthropic_client = build_anthropic_bedrock_client(
+                region,
+                bearer_token=getattr(self, "_bedrock_bearer_token", None),
+                custom_base_url=getattr(self, "_bedrock_custom_base_url", None),
+            )
         else:
             from agent.anthropic_adapter import build_anthropic_client
             self._anthropic_client = build_anthropic_client(

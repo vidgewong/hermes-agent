@@ -829,7 +829,11 @@ def build_anthropic_client(
     return _anthropic_sdk.Anthropic(**kwargs)
 
 
-def build_anthropic_bedrock_client(region: str):
+def build_anthropic_bedrock_client(
+    region: str,
+    bearer_token: str = None,
+    custom_base_url: str = None,
+):
     """Create an AnthropicBedrock client for Bedrock Claude models.
 
     Uses the Anthropic SDK's native Bedrock adapter, which provides full
@@ -844,7 +848,8 @@ def build_anthropic_bedrock_client(region: str):
     serves them with 1M natively.
 
     Auth uses the boto3 default credential chain (IAM roles, SSO, env vars).
-    When AWS_BEARER_TOKEN_BEDROCK and ANTHROPIC_BEDROCK_BASE_URL are set,
+    When bearer_token and custom_base_url are provided (or
+    AWS_BEARER_TOKEN_BEDROCK / ANTHROPIC_BEDROCK_BASE_URL env vars are set),
     uses bearer token auth with a custom base URL instead of SigV4.
     """
     _anthropic_sdk = _get_anthropic_sdk()
@@ -860,8 +865,10 @@ def build_anthropic_bedrock_client(region: str):
         )
     from httpx import Timeout
 
-    bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
-    custom_base_url = os.environ.get("ANTHROPIC_BEDROCK_BASE_URL", "").strip()
+    if not bearer_token:
+        bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+    if not custom_base_url:
+        custom_base_url = os.environ.get("ANTHROPIC_BEDROCK_BASE_URL", "").strip()
 
     if bearer_token and custom_base_url:
         class _BearerBedrockClient(_anthropic_sdk.AnthropicBedrock):
