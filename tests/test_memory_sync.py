@@ -1,0 +1,164 @@
+"""Unit tests for agent.sync_translators.memory_sync."""
+
+from pathlib import Path
+
+import pytest
+
+
+@pytest.fixture
+def memory_env(tmp_path, monkeypatch):
+    """Set up isolated memory directories for testing."""
+    memory_dir = tmp_path / "memory"
+    memory_dir.mkdir()
+    user_me = tmp_path / "user.me"
+
+    import agent.sync_translators.memory_sync as mod
+    monkeypatch.setattr(mod, "MEMORY_DIR", memory_dir)
+    monkeypatch.setattr(mod, "USER_ME_PATH", user_me)
+
+    return memory_dir, user_me
+
+
+def _write_fragment(memory_dir: Path, name: str, mem_type: str, body: str):
+    """Write a memory fragment with frontmatter."""
+    content = f"""---
+name: {name}
+description: test fragment
+metadata:
+  type: {mem_type}
+---
+
+{body}
+"""
+    (memory_dir / f"{name}.md").write_text(content)
+
+
+class TestBuildMemoryAppend:
+    def test_empty_when_no_memory_dir(self, tmp_path, monkeypatch):
+        import agent.sync_translators.memory_sync as mod
+        monkeypatch.setattr(mod, "MEMORY_DIR", tmp_path / "nonexistent")
+        monkeypatch.setattr(mod, "USER_ME_PATH", tmp_path / "no-user.me")
+
+        from agent.sync_translators.memory_sync import build_memory_append
+        assert build_memory_append() == ""
+
+    def test_user_profile_section(self, memory_env):
+        memory_dir, user_me = memory_env
+        user_me.write_text("I'm a senior backend engineer at Acme Corp.")
+
+        from agent.sync_translators.memory_sync import build_memory_append
+        result = build_memory_append()
+
+        assert "## User Profile" in result
+        assert "senior backend engineer" in result
+
+    def test_memory_fragments_grouped_by_type(self, memory_env):
+        memory_dir, user_me = memory_env
+        _write_fragment(memory_dir, "user-role", "user", "User is a data scientist.")
+        _write_fragment(memory_dir, "no-summaries", "feedback", "Don't summarize at end of response.")
+        _write_fragment(memory_dir, "deploy-freeze", "project", "Deploy freeze until Friday.")
+        _write_fragment(memory_dir, "linear-board", "reference", "Bugs tracked in Linear INGEST project.")
+
+        from agent.sync_translators.memory_sync import build_memory_append
+        result = build_memory_append()
+
+        assert "### user-role" in result
+        assert "### no-summaries" in result
+        assert "### deploy-freeze" in result
+        assert "### linear-board" in result
+
+        # Check ordering: user before feedback before project before reference
+        user_pos = result.index("### user-role")
+        feedback_pos = result.index("### no-summaries")
+        project_pos = result.index("### deploy-freeze")
+        reference_pos = result.index("### linear-board")
+        assert user_pos < feedback_pos < project_pos < reference_pos
+
+    def test_size_cap_truncation(self, memory_env):
+        memory_dir, user_me = memory_env
+
+        # Create fragments that exceed 512 bytes total
+        for i in range(20):
+            _write_fragment(memory_dir, f"ref-{i:02d}", "reference", "x" * 100)
+
+        from agent.sync_translators.memory_sync import build_memory_append
+        result = build_memory_append(max_bytes=512)
+
+        assert len(result.encode("utf-8")) <= 512
+        assert "entries omitted: size limit" in result
+
+    def test_graceful_empty_dir(self, memory_env):
+        """Empty memory dir returns empty string."""
+        memory_dir, user_me = memory_env
+        # memory_dir exists but is empty
+
+        from agent.sync_translators.memory_sync import build_memory_append
+        assert build_memory_append() == ""
+
+    def test_skips_MEMORY_md_index(self, memory_env):
+        """MEMORY.md (the index file) is not treated as a fragment."""
+        memory_dir, user_me = memory_env
+        (memory_dir / "MEMORY.md").write_text("- [Foo](foo.md) -- hook")
+        _write_fragment(memory_dir, "actual-frag", "user", "A real fragment.")
+
+        from agent.sync_translators.memory_sync import build_memory_append
+        result = build_memory_append()
+
+        assert "### actual-frag" in result
+        assert "hook" not in result
+
+
+class TestSyncToClaudeMd:
+    @pytest.fixture
+    def claude_env(self, memory_env, tmp_path, monkeypatch):
+        memory_dir, user_me = memory_env
+        claude_md = tmp_path / "dot_claude" / "CLAUDE.md"
+        import agent.sync_translators.memory_sync as mod
+        monkeypatch.setattr(mod, "CLAUDE_MD_PATH", claude_md)
+        return memory_dir, user_me, claude_md
+
+    def test_creates_claude_md_with_memory(self, claude_env):
+        memory_dir, user_me, claude_md = claude_env
+        user_me.write_text("I'm a backend dev.")
+        _write_fragment(memory_dir, "pref", "feedback", "Terse answers.")
+
+        from agent.sync_translators.memory_sync import sync_to_claude_md
+        result = sync_to_claude_md()
+
+        assert result is True
+        assert claude_md.exists()
+        content = claude_md.read_text()
+        assert "AUTO-GENERATED BY HERMES" in content
+        assert "backend dev" in content
+        assert "Terse answers" in content
+
+    def test_no_write_when_empty(self, claude_env):
+        _, _, claude_md = claude_env
+
+        from agent.sync_translators.memory_sync import sync_to_claude_md
+        result = sync_to_claude_md()
+
+        assert result is False
+        assert not claude_md.exists()
+
+    def test_idempotent(self, claude_env):
+        memory_dir, user_me, claude_md = claude_env
+        _write_fragment(memory_dir, "x", "user", "Some memory.")
+
+        from agent.sync_translators.memory_sync import sync_to_claude_md
+        assert sync_to_claude_md() is True
+        assert sync_to_claude_md() is False  # No change
+
+    def test_removes_file_when_memory_cleared(self, claude_env):
+        memory_dir, user_me, claude_md = claude_env
+        _write_fragment(memory_dir, "temp", "user", "Temporary.")
+
+        from agent.sync_translators.memory_sync import sync_to_claude_md
+        sync_to_claude_md()
+        assert claude_md.exists()
+
+        # Remove the fragment
+        (memory_dir / "temp.md").unlink()
+        result = sync_to_claude_md()
+        assert result is True
+        assert not claude_md.exists()

@@ -988,6 +988,14 @@ def memory_tool(
         if gate_result is not None:
             return gate_result
         result = store.apply_batch(target, operations)
+
+        # Sync updated memory to ~/.claude/CLAUDE.md
+        try:
+            from agent.sync_translators.memory_sync import sync_to_claude_md
+            sync_to_claude_md()
+        except Exception:
+            pass
+
         return json.dumps(result, ensure_ascii=False)
 
     # --- Single-op path ---------------------------------------------------
@@ -1024,6 +1032,15 @@ def memory_tool(
 
     else:
         return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
+
+    # Sync updated memory to ~/.claude/CLAUDE.md so direct Claude Code
+    # sessions also see the change.
+    if result.get("success"):
+        try:
+            from agent.sync_translators.memory_sync import sync_to_claude_md
+            sync_to_claude_md()
+        except Exception:
+            pass
 
     return json.dumps(result, ensure_ascii=False)
 
