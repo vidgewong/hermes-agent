@@ -46,7 +46,7 @@ class ClaudeCodeSession:
         model: str | None = None,
         system_prompt: str | None = None,
         allowed_tools: list[str] | None = None,
-        mcp_servers: dict[str, Any] | None = None,
+        mcp_servers: dict[str, Any] | Any | None = None,
         max_turns: int | None = None,
         extra_env: dict[str, str] | None = None,
         resume: str | None = None,
@@ -115,15 +115,52 @@ class ClaudeCodeSession:
         if "ANTHROPIC_MODEL" not in env:
             sdk_model = provider_config.model or self._model
 
+        # Reconcile Hermes skills into ~/.agents/skills/ so Claude Code's
+        # native Skill tool can find them, then start a background watcher
+        # for real-time bidirectional sync.
+        try:
+            from agent.skill_gateway import SkillGateway
+            self._skill_gateway = SkillGateway()
+            self._skill_gateway.reconcile()
+            self._skill_gateway.start_watcher()
+        except Exception:
+            logger.debug("skill gateway reconcile failed", exc_info=True)
+
+        # Sync Hermes memory to ~/.claude/CLAUDE.md and start a watcher
+        # for bidirectional live sync (either side can be edited).
+        try:
+            from agent.sync_translators.memory_sync import sync_hermes_to_claude, MemoryWatcher
+            sync_hermes_to_claude()
+            self._memory_watcher = MemoryWatcher()
+            self._memory_watcher.start()
+        except Exception:
+            logger.debug("memory sync failed", exc_info=True)
+
         # Use Claude Code's default system prompt as the base and append
         # Hermes' platform instructions (MEDIA: tags, messaging conventions,
         # skills index, memory, etc.) on top. This preserves Claude Code's
         # built-in tool behaviour while adding Hermes-specific guidance.
         # Passing a raw string as system_prompt would replace the default
         # entirely, causing Claude to lose file-delivery conventions.
+        _sdk_delegation_guidance = (
+            "\n\n## Delegation & User Interaction\n"
+            "You have TWO delegation mechanisms:\n"
+            "- **Agent tool** (built-in): for focused subtasks with context isolation and "
+            "tool restrictions. Subagents run independently and return a summary. Best for "
+            "code review, research, analysis, and parallel work.\n"
+            "- **delegate_task** (MCP tool): for Hermes-aware work that needs gateway "
+            "session routing, depth tracking, background result delivery, or access to "
+            "Hermes-specific state. Best for long-running background tasks and orchestrated workflows.\n\n"
+            "For **AskUserQuestion**: only ask when the decision genuinely requires user "
+            "input (ambiguous requirements, multiple valid approaches, destructive actions). "
+            "For routine decisions, proceed autonomously."
+        )
+        _combined_prompt = (
+            (self._system_prompt or "") + _sdk_delegation_guidance
+        )
         _sdk_system_prompt = (
-            {"type": "preset", "preset": "claude_code", "append": self._system_prompt}
-            if self._system_prompt
+            {"type": "preset", "preset": "claude_code", "append": _combined_prompt}
+            if _combined_prompt.strip()
             else None
         )
 
@@ -138,8 +175,8 @@ class ClaudeCodeSession:
         _builtin_tools_to_block = [
             # Shell / file — replaced by terminal, read_file, write_file, patch, search_files
             "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-            # Agents / workflows — not needed; Hermes handles orchestration
-            "Agent", "Workflow",
+            # Workflow — Hermes owns orchestration; stays blocked intentionally
+            "Workflow",
             # Web — replaced by hermes web_search / web_extract
             "WebFetch",
             # Deferred built-ins — all replaced by hermes equivalents
@@ -154,17 +191,39 @@ class ClaudeCodeSession:
             # Hermes skills are accessible via mcp__hermes-tools__skill_view,
             # skills_list, and skill_manage instead.
             "Skill",
+            # NOT blocked (enabled):
+            # - AskUserQuestion: bridged via canUseTool callback to Hermes gateway/TUI
+            # - Agent: SDK native subagents, coexists with delegate_task
+            # - Monitor: background process watching, runs within CLI subprocess
         ]
+        # Build canUseTool callback that bridges AskUserQuestion to Hermes
+        from agent.ask_user_bridge import can_use_tool_callback as _ask_user_cb
+
+        _agent_ref = self._agent
+
+        async def _can_use_tool(tool_name, input_data, context):
+            return await _ask_user_cb(tool_name, input_data, context, agent=_agent_ref)
+
+        # Build subagent definitions from Hermes profiles
+        try:
+            from agent.sdk_subagent_profiles import build_hermes_agent_definitions
+            _agents = build_hermes_agent_definitions()
+        except Exception:
+            logger.debug("sdk subagent profiles unavailable", exc_info=True)
+            _agents = None
+
         options = ClaudeAgentOptions(
             model=sdk_model,
             system_prompt=_sdk_system_prompt,
             cwd=self._cwd,
             permission_mode="bypassPermissions",
-            allowed_tools=self._allowed_tools or [],
+            allowed_tools=[*(self._allowed_tools or []), "Agent", "Monitor"],
             disallowed_tools=_builtin_tools_to_block,
             mcp_servers=self._mcp_servers,
             max_turns=self._max_turns,
             resume=self._resume,
+            can_use_tool=_can_use_tool,
+            agents=_agents,
             include_partial_messages=True,
             include_hook_events=True,
             env=env,
@@ -417,6 +476,16 @@ class ClaudeCodeSession:
 
     async def close(self):
         """Disconnect and clean up."""
+        if hasattr(self, "_skill_gateway") and self._skill_gateway:
+            try:
+                self._skill_gateway.stop_watcher()
+            except Exception:
+                pass
+        if hasattr(self, "_memory_watcher") and self._memory_watcher:
+            try:
+                self._memory_watcher.stop()
+            except Exception:
+                pass
         if self._client:
             try:
                 await self._client.disconnect()

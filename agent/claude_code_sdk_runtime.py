@@ -171,7 +171,7 @@ def run_claude_code_sdk_turn(
             model=agent.model if "claude" in (agent.model or "").lower() else None,
             system_prompt=getattr(agent, "_cached_system_prompt", None),
             max_turns=agent.max_iterations,
-            mcp_servers=_build_hermes_tools_mcp_config(),
+            mcp_servers=_build_hermes_tools_mcp_config(agent),
             resume=_resume_id,
             on_event=_on_event,
             on_stream_delta=_on_stream_delta,
@@ -414,18 +414,35 @@ def _load_sdk_session_id(agent) -> str | None:
         return None
 
 
-def _build_hermes_tools_mcp_config() -> dict:
-    """Build the mcp_servers dict that injects Hermes tools into the Claude Code SDK session.
+def _build_hermes_tools_mcp_config(agent=None) -> dict:
+    """Build the mcp_servers config that injects Hermes tools into the Claude Code SDK session.
 
-    Spawns agent.transports.hermes_tools_mcp_server as a stdio MCP subprocess so
-    the Claude CLI can call web_search, browser_*, vision_analyze, etc. alongside
-    its built-in tools (Bash, Read, Write, …).
+    Prefers the in-process MCP path (McpSdkServerConfig, type: "sdk") when
+    claude-agent-sdk >= 0.2.110 is available. Falls back to spawning
+    agent.transports.hermes_tools_mcp_server as a stdio subprocess.
 
-    Uses the same venv Python that is running Hermes, so all tool dependencies
-    (firecrawl, playwright, etc.) are available without extra setup.
-
-    Returns an empty dict if the mcp package is not installed (graceful degradation).
+    Returns an empty dict if neither path is available (graceful degradation).
     """
+    # Try in-process MCP first (no subprocess, direct agent access).
+    try:
+        from agent.in_process_mcp import build_hermes_in_process_mcp
+        config = build_hermes_in_process_mcp(agent)
+        logger.info("using in-process MCP for hermes-tools")
+        return {"hermes-tools": config}
+    except ImportError as exc:
+        logger.warning(
+            "in-process MCP unavailable (SDK too old?), falling back to stdio: %s", exc
+        )
+    except Exception as exc:
+        logger.warning(
+            "in-process MCP setup failed, falling back to stdio: %s", exc
+        )
+
+    return _build_hermes_tools_mcp_config_stdio()
+
+
+def _build_hermes_tools_mcp_config_stdio() -> dict:
+    """Fallback: stdio MCP subprocess config (pre-0.2.110 path)."""
     import sys
     import os
 
@@ -435,7 +452,6 @@ def _build_hermes_tools_mcp_config() -> dict:
         logger.debug("mcp package not installed; skipping hermes-tools MCP bridge")
         return {}
 
-    # Resolve the hermes-agent root so the module can be found regardless of cwd.
     hermes_root = str(_hermes_agent_root())
 
     return {
@@ -444,15 +460,9 @@ def _build_hermes_tools_mcp_config() -> dict:
             "command": sys.executable,
             "args": ["-m", "agent.transports.hermes_tools_mcp_server"],
             "env": {
-                # The claude CLI inherits the parent process env, so credentials
-                # (ANTHROPIC_*, FIRECRAWL_*, etc.) reach the MCP subprocess
-                # automatically. We only need to ensure the module is importable.
                 "PYTHONPATH": hermes_root,
                 "HERMES_QUIET": "1",
                 "HERMES_REDACT_SECRETS": "true",
-                # Forward session-type flags so tools whose check_fn gates on
-                # these (e.g. cronjob requires HERMES_GATEWAY_SESSION or
-                # HERMES_INTERACTIVE) are available inside the MCP subprocess.
                 **{
                     k: os.environ[k]
                     for k in (

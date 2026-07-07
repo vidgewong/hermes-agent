@@ -1031,6 +1031,7 @@ def handle_function_call(
     tool_request_middleware_trace: Optional[List[Dict[str, Any]]] = None,
     enabled_toolsets: Optional[List[str]] = None,
     disabled_toolsets: Optional[List[str]] = None,
+    agent=None,
 ) -> str:
     """
     Main function call dispatcher that routes calls to the tool registry.
@@ -1158,7 +1159,7 @@ def handle_function_call(
             logger.debug("tool_request middleware error: %s", _mw_err)
 
     try:
-        if function_name in _AGENT_LOOP_TOOLS:
+        if function_name in _AGENT_LOOP_TOOLS and agent is None:
             return json.dumps({"error": f"{function_name} must be handled by the agent loop"})
 
         # Check plugin hooks for a block directive (unless caller already
@@ -1263,11 +1264,17 @@ def handle_function_call(
                     )
             else:
                 def _dispatch(next_args: Dict[str, Any]) -> Any:
+                    _extra_kw: Dict[str, Any] = {
+                        "task_id": task_id,
+                        "session_id": session_id,
+                        "user_task": user_task,
+                    }
+                    if agent is not None:
+                        _extra_kw["parent_agent"] = agent
+                        _extra_kw["callback"] = getattr(agent, "_read_terminal_callback", None)
                     return registry.dispatch(
                         function_name, next_args,
-                        task_id=task_id,
-                        session_id=session_id,
-                        user_task=user_task,
+                        **_extra_kw,
                     )
             from hermes_cli.middleware import run_tool_execution_middleware
 

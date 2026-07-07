@@ -1,23 +1,46 @@
-## ADDED Requirements
-
 ### Requirement: Minimal tool blocklist for SDK runtime
-The system SHALL only block Claude Code built-in tools that directly conflict with Hermes orchestration. All other built-in tools SHALL be enabled.
+The system SHALL only block Claude Code built-in tools that directly conflict with Hermes orchestration or have no meaning in the Hermes context. Tools that provide additive capabilities (user interaction, monitoring, subagents) SHALL be enabled.
 
-#### Scenario: Blocked tools — orchestration conflicts only
+#### Scenario: Blocked tools — orchestration conflicts and duplicates only
 - **WHEN** the Claude Code SDK runtime initializes
-- **THEN** `disallowed_tools` SHALL contain exactly: `Agent`, `Workflow`, `SendMessage`, `EnterWorktree`, `ExitWorktree` — and no others
+- **THEN** `disallowed_tools` SHALL contain: `Workflow`, `EnterWorktree`, `ExitWorktree`, `SendMessage` (orchestration conflicts)
+- **AND** `disallowed_tools` SHALL contain: `Bash`, `Read`, `Write`, `Edit`, `Glob`, `Grep`, `WebFetch` (replaced by Hermes MCP equivalents)
+- **AND** `disallowed_tools` SHALL contain: `CronCreate`, `CronDelete`, `CronList`, `ScheduleWakeup`, `TaskCreate`, `TaskGet`, `TaskList`, `TaskOutput`, `TaskStop`, `TaskUpdate` (replaced by Hermes equivalents)
+- **AND** `disallowed_tools` SHALL contain: `LSP`, `NotebookEdit`, `ToolSearch`, `ReportFindings`, `Skill` (not applicable or replaced)
+- **AND** `disallowed_tools` SHALL NOT contain: `AskUserQuestion`, `Agent`, `Monitor`
 
-#### Scenario: File and shell tools are enabled
-- **WHEN** the Claude Code SDK runtime is active and the model requests a file or shell operation (Read, Write, Edit, Bash, Glob, Grep)
-- **THEN** Claude Code's native built-in tool SHALL handle the operation directly
-
-#### Scenario: Cron and task tools are enabled
+#### Scenario: AskUserQuestion is enabled
 - **WHEN** the Claude Code SDK runtime is active
-- **THEN** CronCreate, CronDelete, CronList, ScheduleWakeup, TaskCreate, TaskGet, TaskList, TaskOutput, TaskStop, TaskUpdate SHALL be available as Claude Code built-ins
+- **THEN** `AskUserQuestion` SHALL NOT be in `disallowed_tools`
+- **AND** it SHALL be handled by the `canUseTool` callback (not auto-approved silently)
 
-#### Scenario: Skill tool is enabled and finds Hermes skills
-- **WHEN** the Claude Code SDK runtime invokes the `Skill` tool
-- **THEN** it SHALL find Hermes-originated skills in `~/.claude/skills/` because the skill gateway reconcile has symlinked them at session start
+#### Scenario: Agent tool is enabled
+- **WHEN** the Claude Code SDK runtime is active
+- **THEN** `Agent` SHALL NOT be in `disallowed_tools`
+- **AND** it SHALL be auto-approved (included in `allowed_tools`)
+
+#### Scenario: Monitor tool is enabled
+- **WHEN** the Claude Code SDK runtime is active
+- **THEN** `Monitor` SHALL NOT be in `disallowed_tools`
+- **AND** it SHALL be auto-approved (included in `allowed_tools`)
+
+### Requirement: Minimal MCP tool blocklist for in-process server
+The system SHALL only block MCP tools that genuinely cannot function in the SDK context. Tools previously blocked due to subprocess isolation (needing AIAgent access) SHALL be unblocked now that handlers execute in-process.
+
+#### Scenario: MCP blocked tools — reduced to true incompatibilities
+- **WHEN** the in-process MCP server initializes
+- **THEN** the blocked tools set SHALL contain only: `clarify`, `computer_use`
+- **AND** `delegate_task`, `read_terminal`, `close_terminal` SHALL NOT be in the blocked set
+
+#### Scenario: delegate_task is available in SDK mode
+- **WHEN** the Claude Code SDK runtime is active with in-process MCP
+- **THEN** `delegate_task` SHALL be exposed as an available MCP tool
+- **AND** it SHALL function correctly using the AIAgent instance from the closure
+
+#### Scenario: read_terminal and close_terminal are available
+- **WHEN** the Claude Code SDK runtime is active with in-process MCP
+- **THEN** `read_terminal` and `close_terminal` SHALL be exposed as available MCP tools
+- **AND** they SHALL access the terminal environment manager from the AIAgent instance
 
 ### Requirement: MCP surface deduplication in SDK runtime
 The system SHALL not expose tools via the Hermes MCP server that duplicate enabled Claude Code built-ins, to prevent the model from seeing redundant overlapping tool options.
@@ -32,7 +55,7 @@ The system SHALL not expose tools via the Hermes MCP server that duplicate enabl
 
 #### Scenario: Native runtime is unaffected
 - **WHEN** the active runtime is the native Python loop
-- **THEN** the Hermes MCP server tool list SHALL not be filtered (no change to existing behavior)
+- **THEN** the tool dispatch and MCP tool list SHALL not be affected by these changes
 
 ### Requirement: Cron tool description clarifies delivery model
 The system SHALL update the `cronjob` MCP tool description to make clear when to use Hermes cron vs Claude Code's built-in CronCreate.
