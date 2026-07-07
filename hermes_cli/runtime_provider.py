@@ -406,7 +406,7 @@ def _maybe_apply_claude_code_sdk_runtime(
     Returns the (possibly-rewritten) api_mode."""
     if not model_cfg:
         return api_mode
-    _COMPATIBLE_PROVIDERS = {"anthropic", "bedrock", "vertex", "claude-code", ""}
+    _COMPATIBLE_PROVIDERS = {"anthropic", "bedrock", "vertex", "claude-code", "custom", ""}
     if provider not in _COMPATIBLE_PROVIDERS:
         return api_mode
     runtime = str(model_cfg.get("claude_code_runtime") or "").strip().lower()
@@ -1566,6 +1566,54 @@ def resolve_runtime_provider(
             "source": "moa-virtual-provider",
             "requested_provider": requested_provider,
         }
+
+    # Claude Code SDK short-circuit: when claude_code_runtime == "claude_code_sdk"
+    # is set in config.yaml, resolve the provider credentials normally (so
+    # custom_providers entries are honoured) then force api_mode to
+    # "claude_code_sdk". The SDK subprocess manages its own auth via env vars
+    # forwarded by claude_code_provider_bridge.py.
+    #
+    # Only intercepts the main-agent path (requested=None). Explicit requests
+    # (e.g. auxiliary_client asking for "custom" to build an OpenAI client for
+    # title generation) must resolve normally and get a usable api_key + base_url.
+    _model_cfg_for_sdk = _get_model_config()
+    if (
+        requested is None
+        and str(_model_cfg_for_sdk.get("claude_code_runtime") or "").strip().lower() == "claude_code_sdk"
+    ):
+        # config.yaml may have bare `provider: custom` with no base_url, which
+        # falls through to OpenRouter. Recover the real custom_providers identity:
+        # 1. try canonical_custom_identity (reverse-lookup by base_url or provider)
+        # 2. scan custom_providers for the first entry with credentials
+        _identity = requested_provider
+        if _identity in ("custom", "auto", ""):
+            _cfg_base = str(_model_cfg_for_sdk.get("base_url") or "").strip()
+            _cfg_provider = str(_model_cfg_for_sdk.get("provider") or "").strip()
+            _identity = canonical_custom_identity(
+                base_url=_cfg_base or None,
+                config_provider=_cfg_provider,
+            ) or _identity
+        if _identity in ("custom", "auto", ""):
+            try:
+                from hermes_cli.config import get_compatible_custom_providers, load_config as _lc
+                for _entry in get_compatible_custom_providers(_lc()) or []:
+                    _name = _normalize_custom_provider_name((_entry.get("name") or "").strip())
+                    if _name:
+                        _candidate = _resolve_named_custom_runtime(requested_provider=_name)
+                        if _candidate and _candidate.get("api_key"):
+                            _identity = _name
+                            break
+            except Exception:
+                pass
+        _resolved = _resolve_named_custom_runtime(requested_provider=_identity) or {
+            "provider": "custom",
+            "base_url": str(_model_cfg_for_sdk.get("base_url") or "").strip(),
+            "api_key": str(_model_cfg_for_sdk.get("api_key") or "").strip(),
+            "source": "claude_code_sdk_direct",
+        }
+        _resolved["api_mode"] = "claude_code_sdk"
+        _resolved["requested_provider"] = requested_provider
+        return _resolved
 
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would

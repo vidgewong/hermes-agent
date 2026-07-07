@@ -862,6 +862,18 @@ def init_agent(
         agent.base_url = "moa://local"
         if not agent.quiet_mode:
             print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
+    elif agent.api_mode == "claude_code_sdk":
+        # Claude Code SDK runtime — the SDK manages its own subprocess.
+        # No OpenAI/Anthropic client is needed here; ClaudeCodeSession
+        # is created lazily in claude_code_sdk_runtime.py on the first turn.
+        # Store credentials on the agent so set_runtime_main() in turn_context
+        # can register them with the auxiliary client (title gen, compression, etc.)
+        agent.client = None
+        agent._client_kwargs = {}
+        agent.api_key = api_key or ""
+        agent.base_url = base_url or ""
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with model: {agent.model} (Claude Code SDK runtime)")
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
         # Region is extracted from the base_url or defaults to us-east-1.

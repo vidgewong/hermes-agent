@@ -2193,9 +2193,32 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[st
 
     custom_base = custom_base.strip().rstrip("/")
     if base_url_host_matches(custom_base, "openrouter.ai"):
-        # requested='custom' falls back to OpenRouter when no custom endpoint is
-        # configured. Treat that as "no custom endpoint" for auxiliary routing.
-        return None, None, None
+        # requested='custom' falls back to OpenRouter when the config has bare
+        # `provider: custom` with no base_url (e.g. a named custom_providers
+        # entry). Recover by scanning custom_providers for the first entry with
+        # credentials, mirroring what the main agent short-circuit does.
+        try:
+            from hermes_cli.runtime_provider import _resolve_named_custom_runtime, _normalize_custom_provider_name
+            from hermes_cli.config import get_compatible_custom_providers, load_config as _lc_aux
+            _cp_entries = get_compatible_custom_providers(_lc_aux())
+            for _cp_entry in (_cp_entries or []):
+                _cp_name = (_cp_entry.get("name") or "").strip()
+                if not _cp_name:
+                    continue
+                _cp_runtime = _resolve_named_custom_runtime(
+                    requested_provider=_normalize_custom_provider_name(_cp_name)
+                )
+                if _cp_runtime and _cp_runtime.get("api_key") and _cp_runtime.get("base_url"):
+                    _cp_base = str(_cp_runtime["base_url"]).strip().rstrip("/")
+                    if not base_url_host_matches(_cp_base, "openrouter.ai"):
+                        custom_base = _cp_base
+                        custom_key = str(_cp_runtime.get("api_key") or "").strip()
+                        custom_mode = _cp_runtime.get("api_mode")
+                        break
+            else:
+                return None, None, None
+        except Exception:
+            return None, None, None
 
     # Local servers (Ollama, llama.cpp, vLLM, LM Studio) don't require auth.
     # Use a placeholder key — the OpenAI SDK requires a non-empty string but

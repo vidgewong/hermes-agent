@@ -106,6 +106,45 @@ def resolve_provider_for_sdk(agent) -> ClaudeCodeProviderConfig:
             model=sdk_model, env=env, extra_args=extra_args, compatible=True
         )
 
+    # ─── Custom / LiteLLM proxy ───────────────────────────────────
+    # Hermes-resolved credentials (from custom_providers in config.yaml) take
+    # priority over env vars so stale ANTHROPIC_* values can't override them.
+    if provider == "custom" or not provider:
+        if api_key and api_key not in ("no-key-required",):
+            env["ANTHROPIC_API_KEY"] = api_key
+        if base_url:
+            env["ANTHROPIC_BASE_URL"] = base_url
+        sdk_model = _strip_provider_prefix(model) if model else None
+        if sdk_model:
+            env["ANTHROPIC_MODEL"] = sdk_model
+        # Propagate ssl_verify: false → NODE_TLS_REJECT_UNAUTHORIZED=0 for the
+        # Node.js Claude CLI subprocess (Python ssl_verify is handled separately
+        # by the httpx client built in auxiliary_client.py).
+        if base_url:
+            try:
+                from hermes_cli.config import get_custom_provider_tls_settings, load_config as _lc
+                _cfg = _lc()
+                _tls = get_custom_provider_tls_settings(base_url, _cfg.get("custom_providers"), _cfg)
+                if _tls.get("ssl_verify") is False:
+                    env["NODE_TLS_REJECT_UNAUTHORIZED"] = "0"
+            except Exception:
+                pass
+        # Fill any remaining gaps from the environment.
+        for key in (
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_MODEL",
+            "NODE_TLS_REJECT_UNAUTHORIZED",
+        ):
+            if not env.get(key):
+                val = os.environ.get(key)
+                if val:
+                    env[key] = val
+        return ClaudeCodeProviderConfig(
+            model=None, env=env, extra_args=extra_args, compatible=True
+        )
+
     # ─── Incompatible providers ───────────────────────────────────
     return ClaudeCodeProviderConfig(
         model=None,
@@ -114,7 +153,7 @@ def resolve_provider_for_sdk(agent) -> ClaudeCodeProviderConfig:
         compatible=False,
         fallback_reason=(
             f"Provider '{provider}' is not supported by Claude Code SDK. "
-            f"Supported: anthropic, bedrock, vertex, claude-code (OAuth). "
+            f"Supported: anthropic, bedrock, vertex, claude-code (OAuth), custom. "
             f"Falling back to hermes native runtime."
         ),
     )
