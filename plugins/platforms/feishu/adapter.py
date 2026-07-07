@@ -1420,10 +1420,14 @@ def check_feishu_requirements() -> bool:
     return ensure_and_bind("platform.feishu", _import, globals(), prompt=False)
 
 
-class FeishuAdapter(BasePlatformAdapter):
+from plugins.platforms.feishu.stream_card_mixin import FeishuStreamCardMixin  # noqa: E402
+
+
+class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
     """Feishu/Lark bot adapter."""
 
     supports_code_blocks = True  # Feishu renders fenced code blocks
+    supports_markdown_tables = True  # Feishu md elements render tables
     splits_long_messages = True  # send() chunks via truncate_message(MAX_MESSAGE_LENGTH)
 
     MAX_MESSAGE_LENGTH = 8000
@@ -1495,6 +1499,10 @@ class FeishuAdapter(BasePlatformAdapter):
         # Update prompt button state (prompt_id → {session_key, message_id, chat_id})
         self._update_prompt_state: Dict[int, Dict[str, str]] = {}
         self._update_prompt_counter = itertools.count(1)
+        # Clarify card state (clarify_id → {session_key, chat_id, question, choices})
+        self._clarify_state: Dict[str, Dict[str, Any]] = {}
+        # Stream card state (session_key → FeishuStreamCard)
+        self._init_stream_card_state()
         # Feishu reaction deletion requires the opaque reaction_id returned
         # by create, so we cache it per message_id.
         self._pending_processing_reactions: "OrderedDict[str, str]" = OrderedDict()
@@ -1983,49 +1991,53 @@ class FeishuAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send an interactive card with approval buttons.
 
-        The buttons carry ``hermes_action`` in their value dict so that
-        ``_handle_card_action_event`` can intercept them and call
-        ``resolve_gateway_approval()`` to unblock the waiting agent thread.
+        Uses the InteractiveCard builder for structure. Buttons carry both
+        the legacy ``hermes_action`` key (for backward compat with existing
+        callback handler) and the new prefix-based ``action`` value.
         """
         if not self._client:
             return SendResult(success=False, error="Not connected")
 
         try:
+            from gateway.cards import CardButton, InteractiveCard
+            from plugins.platforms.feishu.card_renderer import render_card_to_feishu
+
             approval_id = next(self._approval_counter)
             cmd_preview = command[:3000] + "..." if len(command) > 3000 else command
 
-            def _btn(label: str, action_name: str, btn_type: str = "default") -> dict:
-                return {
-                    "tag": "button",
-                    "text": {"tag": "plain_text", "content": label},
-                    "type": btn_type,
-                    "value": {"hermes_action": action_name, "approval_id": approval_id},
-                }
+            card = (
+                InteractiveCard.builder()
+                .title("⚠️ Command Approval Required", "orange")
+                .markdown(f"```\n{cmd_preview}\n```\n**Reason:** {description}")
+                .actions([
+                    CardButton(text="✅ Allow Once", type="primary", value=f"perm:approve_once"),
+                    CardButton(text="✅ Session", type="default", value=f"perm:approve_session"),
+                    CardButton(text="✅ Always", type="default", value=f"perm:approve_always"),
+                    CardButton(text="❌ Deny", type="danger", value=f"perm:deny"),
+                ])
+                .note("Reply allow/deny or click a button")
+                .build()
+            )
 
-            card = {
-                "config": {"wide_screen_mode": True},
-                "header": {
-                    "title": {"content": "⚠️ Command Approval Required", "tag": "plain_text"},
-                    "template": "orange",
-                },
-                "elements": [
-                    {
-                        "tag": "markdown",
-                        "content": f"```\n{cmd_preview}\n```\n**Reason:** {description}",
-                    },
-                    {
-                        "tag": "action",
-                        "actions": [
-                            _btn("✅ Allow Once", "approve_once", "primary"),
-                            _btn("✅ Session", "approve_session"),
-                            _btn("✅ Always", "approve_always"),
-                            _btn("❌ Deny", "deny", "danger"),
-                        ],
-                    },
-                ],
+            # Render to Feishu JSON and inject legacy hermes_action keys for
+            # backward compatibility with existing _handle_approval_card_action
+            card_dict = render_card_to_feishu(card, session_key)
+            _ACTION_TO_LEGACY = {
+                "perm:approve_once": "approve_once",
+                "perm:approve_session": "approve_session",
+                "perm:approve_always": "approve_always",
+                "perm:deny": "deny",
             }
+            for el in card_dict.get("elements", []):
+                if el.get("tag") == "action":
+                    for btn in el.get("actions", []):
+                        val = btn.get("value", {})
+                        action_str = val.get("action", "")
+                        if action_str in _ACTION_TO_LEGACY:
+                            val["hermes_action"] = _ACTION_TO_LEGACY[action_str]
+                            val["approval_id"] = approval_id
 
-            payload = json.dumps(card, ensure_ascii=False)
+            payload = json.dumps(card_dict, ensure_ascii=False)
             response = await self._feishu_send_with_retry(
                 chat_id=chat_id,
                 msg_type="interactive",
@@ -2045,6 +2057,157 @@ class FeishuAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.warning("[Feishu] send_exec_approval failed: %s", exc)
             return SendResult(success=False, error=str(exc))
+
+    # ------------------------------------------------------------------
+    # AskUser / Clarify interactive card
+    # ------------------------------------------------------------------
+
+    async def send_clarify(
+        self,
+        chat_id: str,
+        question: str,
+        choices: Optional[list],
+        clarify_id: str,
+        session_key: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an interactive clarify card (blue header + option buttons).
+
+        For single-select: renders each choice as a ListItem with a button.
+        For open-ended: renders the question with a note to reply freely.
+        In both cases, also calls mark_awaiting_text so typed replies work.
+        """
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        from gateway.cards import CardButton, InteractiveCard
+        from plugins.platforms.feishu.card_renderer import render_card_to_feishu_json
+        from tools.clarify_gateway import mark_awaiting_text
+
+        builder = InteractiveCard.builder().title("❓ Question", "blue")
+        builder.markdown(f"**{question}**")
+
+        if choices:
+            for i, choice in enumerate(choices, start=1):
+                choice_text = str(choice)
+                builder.list_item(
+                    choice_text,
+                    choice_text,
+                    btn_type="default",
+                    btn_value=f"clarify:{clarify_id}:{i}",
+                    extra={"clarify_label": choice_text, "clarify_question": question},
+                )
+            builder.note("点击按钮选择，或直接回复文字")
+        else:
+            builder.note("请直接回复您的答案")
+
+        card = builder.build()
+
+        # Store clarify state for callback resolution
+        self._clarify_state[clarify_id] = {
+            "session_key": session_key,
+            "chat_id": chat_id,
+            "question": question,
+            "choices": choices or [],
+        }
+
+        # Always enable text-intercept so typed replies resolve the clarify
+        mark_awaiting_text(clarify_id)
+
+        try:
+            payload = render_card_to_feishu_json(card, session_key)
+            response = await self._feishu_send_with_retry(
+                chat_id=chat_id,
+                msg_type="interactive",
+                payload=payload,
+                reply_to=None,
+                metadata=metadata,
+            )
+            return self._finalize_send_result(response, "send_clarify card failed")
+        except Exception as exc:
+            logger.warning("[Feishu] send_clarify card failed: %s", exc)
+            return SendResult(success=False, error=str(exc))
+
+    def _handle_clarify_card_action(self, *, event: Any, action_value: Dict[str, Any], loop: Any) -> Any:
+        """Handle a clarify: prefixed card action callback synchronously."""
+        action_str = action_value.get("action", "")
+        parts = action_str.split(":")
+        if len(parts) < 3:
+            logger.debug("[Feishu] Malformed clarify action: %s", action_str)
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        clarify_id = parts[1]
+        choice_index = int(parts[2]) if parts[2].isdigit() else 0
+
+        state = self._clarify_state.get(clarify_id)
+        if not state:
+            logger.debug("[Feishu] Clarify %s already resolved or unknown", clarify_id)
+            return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
+
+        # Operator validation
+        operator = getattr(event, "operator", None)
+        open_id = str(getattr(operator, "open_id", "") or "")
+        if not self._is_interactive_operator_authorized(open_id):
+            logger.warning("[Feishu] Unauthorized clarify click by %s", open_id or "<unknown>")
+            if P2CardActionTriggerResponse is None:
+                return None
+            response = P2CardActionTriggerResponse()
+            response.toast = {"type": "error", "content": "Only the session owner can answer"}
+            return response
+
+        # Resolve the clarify
+        choices = state.get("choices", [])
+        if 1 <= choice_index <= len(choices):
+            chosen_text = str(choices[choice_index - 1])
+        else:
+            chosen_text = action_value.get("extra", {}).get("clarify_label", str(choice_index))
+
+        self._clarify_state.pop(clarify_id, None)
+
+        self._submit_on_loop(
+            loop,
+            self._resolve_clarify(clarify_id, chosen_text),
+        )
+
+        # Return replacement confirmation card
+        if P2CardActionTriggerResponse is None:
+            return None
+        response = P2CardActionTriggerResponse()
+        if CallBackCard is not None:
+            card = CallBackCard()
+            card.type = "raw"
+            card.data = self._build_resolved_clarify_card(
+                question=state.get("question", ""),
+                answer=chosen_text,
+            )
+            response.card = card
+        return response
+
+    async def _resolve_clarify(self, clarify_id: str, response_text: str) -> None:
+        """Resolve the pending clarify via the gateway."""
+        try:
+            from tools.clarify_gateway import resolve_gateway_clarify
+            resolved = resolve_gateway_clarify(clarify_id, response_text)
+            logger.info("[Feishu] Clarify %s resolved=%s answer=%r", clarify_id, resolved, response_text)
+        except Exception as exc:
+            logger.error("[Feishu] Failed to resolve clarify %s: %s", clarify_id, exc)
+
+    @staticmethod
+    def _build_resolved_clarify_card(*, question: str, answer: str) -> Dict[str, Any]:
+        """Build the green confirmation card shown after a clarify is answered."""
+        return {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "title": {"content": "✅ 已选择", "tag": "plain_text"},
+                "template": "green",
+            },
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": f"**{question}**\n\n➜ {answer}",
+                },
+            ],
+        }
 
     @staticmethod
     def _build_update_prompt_card(*, prompt: str, default: str, prompt_id: int) -> Dict[str, Any]:
@@ -2662,6 +2825,28 @@ class FeishuAdapter(BasePlatformAdapter):
                 action_value=action_value,
                 loop=loop,
             )
+
+        # Prefix-based routing for new card types (action value string)
+        action_str = action_value.get("action", "") if isinstance(action_value, dict) else ""
+        if isinstance(action_str, str):
+            if action_str.startswith("clarify:"):
+                return self._handle_clarify_card_action(event=event, action_value=action_value, loop=loop)
+            if action_str.startswith("perm:"):
+                # New-format approval — translate to legacy handler
+                _PERM_TO_LEGACY = {
+                    "perm:approve_once": "approve_once",
+                    "perm:approve_session": "approve_session",
+                    "perm:approve_always": "approve_always",
+                    "perm:deny": "deny",
+                }
+                legacy_action = _PERM_TO_LEGACY.get(action_str)
+                if legacy_action:
+                    action_value["hermes_action"] = legacy_action
+                    return self._handle_approval_card_action(event=event, action_value=action_value, loop=loop)
+            if action_str.startswith("stream:"):
+                # Stream card interactions (e.g., stop generation) — placeholder
+                logger.debug("[Feishu] Stream card action: %s (not yet implemented)", action_str)
+                return P2CardActionTriggerResponse() if P2CardActionTriggerResponse else None
 
         self._submit_on_loop(loop, self._handle_card_action_event(data))
         if P2CardActionTriggerResponse is None:
@@ -4522,13 +4707,9 @@ class FeishuAdapter(BasePlatformAdapter):
     # =========================================================================
 
     def _build_outbound_payload(self, content: str) -> tuple[str, str]:
-        # Feishu post-type 'md' elements do not render markdown tables; sending
-        # table content as post causes the message to appear blank on the client.
-        # Force plain text for anything that looks like a markdown table.
-        if _MARKDOWN_TABLE_RE.search(content):
-            text_payload = {"text": content}
-            return "text", json.dumps(text_payload, ensure_ascii=False)
-        if _MARKDOWN_HINT_RE.search(content):
+        # Feishu md elements now support tables in post-type messages.
+        # Use post (md) for any content with markdown hints OR tables.
+        if _MARKDOWN_TABLE_RE.search(content) or _MARKDOWN_HINT_RE.search(content):
             return "post", _build_markdown_post_payload(content)
         text_payload = {"text": content}
         return "text", json.dumps(text_payload, ensure_ascii=False)
