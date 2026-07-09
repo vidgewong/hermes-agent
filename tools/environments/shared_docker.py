@@ -53,7 +53,7 @@ class SharedDockerEnvironment:
             "-e", f"HOME=/home/{self.username}",
             "-e", f"USER={self.username}",
             self.container_name,
-            "bash", "-c", command,
+            "bash", "-c", f"umask 022; {command}",
         ]
 
         try:

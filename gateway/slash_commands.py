@@ -2021,18 +2021,27 @@ class GatewaySlashCommandsMixin:
         if errors:
             return "❌ " + "\n❌ ".join(errors)
 
-        # Load + persist via the same helpers used for /model and /yolo
-        try:
+        from gateway.run import _profile_runtime_scope
+        source = event.source
+        profile_home = self._resolve_profile_home_for_source(source) if source.profile else None
+
+        def _do_apply():
             from hermes_cli.config import load_config, save_config
+            cfg = load_config()
+            return crs.apply(
+                cfg,
+                new_value,
+                persist_callback=(save_config if new_value is not None else None),
+            )
+
+        try:
+            if profile_home:
+                with _profile_runtime_scope(profile_home):
+                    result = _do_apply()
+            else:
+                result = _do_apply()
         except Exception as exc:
             return f"❌ Could not load config: {exc}"
-        cfg = load_config()
-
-        result = crs.apply(
-            cfg,
-            new_value,
-            persist_callback=(save_config if new_value is not None else None),
-        )
 
         # On a real change, evict the cached agent so the new runtime takes
         # effect on the next message rather than waiting for cache TTL.
@@ -2062,17 +2071,27 @@ class GatewaySlashCommandsMixin:
         if errors:
             return "❌ " + "\n❌ ".join(errors)
 
-        try:
+        from gateway.run import _profile_runtime_scope
+        source = event.source
+        profile_home = self._resolve_profile_home_for_source(source) if source.profile else None
+
+        def _do_apply():
             from hermes_cli.config import load_config, save_config
+            cfg = load_config()
+            return ccrs.apply(
+                cfg,
+                new_value,
+                persist_callback=(save_config if new_value is not None else None),
+            )
+
+        try:
+            if profile_home:
+                with _profile_runtime_scope(profile_home):
+                    result = _do_apply()
+            else:
+                result = _do_apply()
         except Exception as exc:
             return f"❌ Could not load config: {exc}"
-        cfg = load_config()
-
-        result = ccrs.apply(
-            cfg,
-            new_value,
-            persist_callback=(save_config if new_value is not None else None),
-        )
 
         if result.success and new_value is not None and result.requires_new_session:
             try:

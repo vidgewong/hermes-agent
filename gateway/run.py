@@ -966,6 +966,7 @@ _AUTO_APPEND_MEDIA_TOOL_NAMES = {
     "text_to_speech",
     "text_to_speech_tool",
     "image_generate",
+    "send_file",
 }
 
 # ---- helpers: detect interrupted tool tails & auto-continue noise ----------
@@ -1087,6 +1088,17 @@ def _collect_auto_append_media_tags(
             continue
         content = str(msg.get("content") or "")
         tool_name = tool_name_by_call_id.get(call_id)
+        # send_file tool: extract host_path directly (any extension allowed).
+        if tool_name == "send_file":
+            try:
+                payload = json.loads(content)
+            except Exception:
+                payload = None
+            if isinstance(payload, dict) and payload.get("success"):
+                path = payload.get("host_path")
+                if isinstance(path, str) and path not in history_media_paths:
+                    media_tags.append(f"MEDIA:{path}")
+            continue
         # JSON-payload tools (image_generate) return a local-file path in a
         # known field rather than a MEDIA: tag. Extract it so delivery is
         # deterministic even when the model omits the path from its reply.
@@ -11295,7 +11307,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
 
             # Multi-tenant environment hint: tell the agent it's in a sandboxed
-            # container so it uses correct paths (not host paths).
+            # container so it uses correct paths and knows how to send files.
             if source.profile and self._tenant_resolver is not None:
                 _tenant_username = self._tenant_user_cache.get(source.profile, {}).get("username", "")
                 _tenant_env_hint = (
@@ -11303,7 +11315,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     f"Your working directory is /home/{_tenant_username}/workspace. "
                     f"All file operations (read, write, terminal) execute in the container. "
                     f"Do NOT use /home/wanyuzh or host paths — they do not exist here. "
-                    f"Use ~/workspace/ or /home/{_tenant_username}/workspace/ for all files.]"
+                    f"Use ~/workspace/ or /home/{_tenant_username}/workspace/ for all files.\n"
+                    f"File delivery: to send a file to the user, emit the FULL absolute path "
+                    f"on its own line, e.g.:\n"
+                    f"/home/{_tenant_username}/workspace/example.py\n"
+                    f"Do NOT wrap it in MEDIA: tags. Just output the bare path.]"
                 )
                 context_prompt = (context_prompt or "") + _tenant_env_hint
 
@@ -12922,6 +12938,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             _VIDEO_EXTS = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.3gp'}
             _IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.gif'}
+
+            # Multi-tenant path translation: container paths → host paths.
+            # Container: /home/<username>/workspace/x → Host: profile_dir/workspace/x
+            def _translate_tenant_path(p: str) -> str:
+                if not source.profile or not self._tenant_user_cache:
+                    return p
+                cached = self._tenant_user_cache.get(source.profile)
+                if not cached:
+                    return p
+                prefix = f"/home/{cached['username']}/workspace/"
+                if p.startswith(prefix):
+                    from hermes_cli.profiles import get_profile_dir
+                    host_path = str(get_profile_dir(source.profile) / "workspace" / p[len(prefix):])
+                    if Path(host_path).exists():
+                        return host_path
+                return p
+
+            media_files = [((_translate_tenant_path(p), v) if isinstance(p, str) else (p, v)) for p, v in media_files]
+            local_files = [_translate_tenant_path(p) if isinstance(p, str) else p for p in local_files]
 
             # Partition out images so they can be sent as a single batch
             # (e.g. Signal's multi-attachment RPC). When [[as_document]] was

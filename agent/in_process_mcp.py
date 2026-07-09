@@ -83,9 +83,12 @@ def _make_handler(tool_name: str, agent):
 
     async def _handler(args: dict) -> dict:
         try:
+            # Pass task_id (= session_id) from the agent so container env overrides resolve correctly
+            _task_id = getattr(agent, "session_id", None) if agent else None
             result = handle_function_call(
                 tool_name,
                 args or {},
+                task_id=_task_id,
                 agent=agent,
             )
         except Exception as exc:
