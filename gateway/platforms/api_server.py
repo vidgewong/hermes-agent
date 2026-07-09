@@ -4813,6 +4813,16 @@ class APIServerAdapter(BasePlatformAdapter):
             # upstream session-control handlers.
             self._app["api_server_adapter"] = self
 
+            # Mount multi-tenant user management API (behind feature flag)
+            try:
+                from hermes_cli.config import load_config as _load_cfg
+                _mt = _load_cfg().get("gateway", {}).get("multi_tenant", {})
+                if _mt.get("enabled"):
+                    from gateway.tenant.api import mount_tenant_routes
+                    mount_tenant_routes(self._app, self._api_key)
+            except Exception:
+                pass
+
             # Start background sweep to clean up orphaned (unconsumed) run streams
             sweep_task = asyncio.create_task(self._sweep_orphaned_runs())
             try:

@@ -1150,6 +1150,10 @@ def _resolve_container_task_id(task_id: Optional[str]) -> str:
     })
     if task_id and task_id in _task_env_overrides:
         overrides = _task_env_overrides[task_id]
+        # Tenant container sharing: all sessions for the same profile
+        # resolve to the same container key so they reuse one container.
+        if "_container_key" in overrides:
+            return overrides["_container_key"]
         if set(overrides.keys()) & _ISOLATION_KEYS:
             return task_id
     return "default"
@@ -1213,7 +1217,7 @@ def _safe_getcwd() -> str:
 # cwd looks when it leaks toward a Linux container's ``-w`` flag.
 _HOST_CWD_PREFIXES = ("/Users/", "/home/", "C:\\", "C:/")
 
-_CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona"})
+_CONTAINER_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona", "shared_docker"})
 
 
 def _is_ssh_remote_tilde_cwd(backend: str, cwd: str) -> bool:
@@ -1422,7 +1426,17 @@ def _create_environment(env_type: str, image: str, cwd: str, timeout: int,
 
     if env_type == "local":
         return _LocalEnvironment(cwd=cwd, timeout=timeout)
-    
+
+    elif env_type == "shared_docker":
+        from tools.environments.shared_docker import SharedDockerEnvironment
+        return SharedDockerEnvironment(
+            container_name=cc.get("_shared_container", "hermes-tenant-shared"),
+            uid=cc.get("_tenant_uid", 1000),
+            username=cc.get("_tenant_username", "tenant"),
+            cwd=cwd,
+            timeout=timeout,
+        )
+
     elif env_type == "docker":
         # One-shot orphan reaper: clean up labeled containers left behind by
         # prior Hermes processes that hit SIGKILL / OOM / a closed terminal
@@ -2080,7 +2094,11 @@ def terminal_tool(
         # ``"default"``) is still found under its originating session id while
         # isolation-keyed RL/benchmark overrides keep resolving as before.
         overrides = resolve_task_overrides(task_id)
-        
+
+        # Per-task env_type override (multi-tenant container isolation)
+        if "env_type" in overrides:
+            env_type = overrides["env_type"]
+
         # Select image based on env type, with per-task override support
         if env_type == "docker":
             image = overrides.get("docker_image") or config["docker_image"]
@@ -2105,7 +2123,7 @@ def terminal_tool(
         # Valid in-container override paths (RL/benchmark sandboxes that set
         # cwd to /workspace, /root, etc.) are absolute non-host paths and pass
         # through untouched.
-        if env_type in _CONTAINER_BACKENDS and _is_unusable_container_cwd(cwd):
+        if env_type in _CONTAINER_BACKENDS and env_type != "shared_docker" and _is_unusable_container_cwd(cwd):
             if cwd != config["cwd"]:
                 logger.info(
                     "Ignoring host/relative cwd override %r for %s backend "
@@ -2198,7 +2216,10 @@ def terminal_tool(
                             }
 
                         container_config = None
-                        if env_type in {"docker", "singularity", "modal", "daytona"}:
+                        if env_type == "shared_docker":
+                            # Shared tenant container: pass through override keys directly
+                            container_config = dict(overrides)
+                        elif env_type in {"docker", "singularity", "modal", "daytona"}:
                             container_config = {
                                 "container_cpu": config.get("container_cpu", 1),
                                 "container_memory": config.get("container_memory", 5120),
@@ -2215,6 +2236,11 @@ def terminal_tool(
                                 "docker_persist_across_processes": config.get("docker_persist_across_processes", True),
                                 "docker_orphan_reaper": config.get("docker_orphan_reaper", True),
                             }
+                            # Merge per-task overrides into container_config
+                            # (tenant isolation, RL benchmarks, etc.)
+                            for _cc_key in container_config:
+                                if _cc_key in overrides:
+                                    container_config[_cc_key] = overrides[_cc_key]
 
                         local_config = None
                         if env_type == "local":

@@ -51,6 +51,11 @@ class GatewayAuthorizationMixin:
             profile_adapters = getattr(self, "_profile_adapters", None) or {}
             if profile_name in profile_adapters:
                 return profile_adapters[profile_name].get(platform)
+            # Multi-tenant mode: tenants share the default adapter (one bot
+            # serves all tenants). Fall through to self.adapters.
+            if getattr(self, "_tenant_resolver", None) is not None:
+                adapters = getattr(self, "adapters", None) or {}
+                return adapters.get(platform)
             # Fail closed: a stamped secondary profile with no registry entry
             # (e.g. its adapter failed to connect) must NOT fall back to the
             # default profile's adapter — that sends replies out the wrong bot.

@@ -1073,6 +1073,10 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             env_type = config["env_type"]
             overrides = resolve_task_overrides(raw_task_id)
 
+            # Per-task env_type override (multi-tenant container isolation)
+            if "env_type" in overrides:
+                env_type = overrides["env_type"]
+
             if env_type == "docker":
                 image = overrides.get("docker_image") or config["docker_image"]
             elif env_type == "singularity":
@@ -1097,7 +1101,7 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             # bypass the guard.  Valid in-container override paths (RL/benchmark
             # sandboxes that set cwd to /workspace, /root, etc.) are absolute
             # non-host paths and pass through untouched.
-            if env_type in _CONTAINER_BACKENDS and _is_unusable_container_cwd(cwd):
+            if env_type in _CONTAINER_BACKENDS and env_type != "shared_docker" and _is_unusable_container_cwd(cwd):
                 if cwd != config["cwd"]:
                     logger.info(
                         "Ignoring host/relative cwd override %r for %s backend "
@@ -1108,7 +1112,9 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
             logger.info("Creating new %s environment for task %s...", env_type, task_id[:8])
 
             container_config = None
-            if env_type in {"docker", "singularity", "modal", "daytona"}:
+            if env_type == "shared_docker":
+                container_config = dict(overrides)
+            elif env_type in {"docker", "singularity", "modal", "daytona"}:
                 container_config = {
                     "container_cpu": config.get("container_cpu", 1),
                     "container_memory": config.get("container_memory", 5120),
@@ -1120,6 +1126,10 @@ def _get_file_ops(task_id: str = "default") -> ShellFileOperations:
                     "docker_run_as_host_user": config.get("docker_run_as_host_user", False),
                     "docker_network": config.get("docker_network", True),
                 }
+                # Merge per-task overrides (tenant isolation, RL benchmarks)
+                for _cc_key in list(container_config):
+                    if _cc_key in overrides:
+                        container_config[_cc_key] = overrides[_cc_key]
 
             ssh_config = None
             if env_type == "ssh":
@@ -1663,10 +1673,14 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
         # Resolve once for the registry lock + stale check.  Failures here
         # fall back to the legacy path — write proceeds, per-task staleness
         # check below still runs.
-        try:
-            _resolved = str(_resolve_path_for_task(path, task_id))
-        except Exception:
-            _resolved = None
+        # For container-backed environments (shared_docker), skip host path
+        # resolution — paths are container-relative.
+        _resolved = None
+        if not _uses_container_paths(task_id):
+            try:
+                _resolved = str(_resolve_path_for_task(path, task_id))
+            except Exception:
+                _resolved = None
 
         if _resolved is None:
             stale_warning = _check_file_staleness(path, task_id)

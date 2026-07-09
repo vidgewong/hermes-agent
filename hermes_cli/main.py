@@ -12992,6 +12992,26 @@ def main():
     kanban_parser.set_defaults(func=cmd_kanban)
 
     # =========================================================================
+    # tenant command — multi-tenant user management
+    # =========================================================================
+    tenant_parser = subparsers.add_parser(
+        "tenant",
+        help="Multi-tenant user management (list, add, remove, link, provision)",
+        description=(
+            "Manage multi-tenant users: register users, link IM identities "
+            "for gateway routing, provision isolated profiles, and check "
+            "system status. Requires gateway.multi_tenant.enabled: true "
+            "in config.yaml."
+        ),
+    )
+    try:
+        from hermes_cli.tenant import register_cli as _register_tenant_cli
+
+        _register_tenant_cli(tenant_parser)
+    except Exception as _exc:
+        logging.getLogger(__name__).debug("tenant CLI wiring failed: %s", _exc)
+
+    # =========================================================================
     # project command — named, multi-folder workspaces
     # =========================================================================
     from hermes_cli.projects_cmd import build_parser as _build_project_parser

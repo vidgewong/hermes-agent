@@ -171,6 +171,11 @@ wecom = ["defusedxml==0.7.1"]
 claude-code = [
     "claude-agent-sdk>=0.1.0",
 ]
+tenant = [
+    "asyncpg>=0.29.0,<0.31",
+    "sqlalchemy[asyncio]>=2.0.0,<3",
+    "alembic>=1.13.0,<2",
+]
 cli = ["simple-term-menu==1.6.6"]
 tts-premium = ["elevenlabs==1.59.0"]
 voice = [

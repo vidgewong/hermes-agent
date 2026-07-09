@@ -1,0 +1,48 @@
+# Hermes tenant container — lightweight single-profile runtime.
+# Based on company Python image for internal registry compatibility.
+
+FROM artifact.swfcn.i.mercedes-benz.com/swfcn_docker/python:3.12.0-slim
+
+# Build-time proxy (for pip install). Cleared after build via multi-stage or unset.
+ARG PROXY_URL=http://proxy-fdc2.con-05.emea.dc.corpintra.net:3128
+ARG BUILD_NO_PROXY=localhost,127.0.0.1,.corpintra.net,.i.mercedes-benz.com
+
+ENV HERMES_HOME=/home/openstar/.hermes \
+    HERMES_SINGLE_PROFILE=true \
+    PYTHONUNBUFFERED=1
+
+# UID/GID 1000 matches the typical host developer account so bind-mounted
+# profile directories have correct ownership without chown in compose.
+RUN groupadd -g 1000 openstar && useradd -u 1000 -g openstar -m -s /bin/bash openstar
+
+# The superuser's hermes-agent code is bind-mounted at /opt/hermes-agent (read-only).
+# The tenant's profile directory is bind-mounted at /home/openstar/.hermes/.
+WORKDIR /opt/hermes-agent
+
+# Install runtime dependencies using build-time proxy only.
+COPY requirements-tenant.txt /tmp/
+RUN HTTP_PROXY=${PROXY_URL} HTTPS_PROXY=${PROXY_URL} \
+    http_proxy=${PROXY_URL} https_proxy=${PROXY_URL} \
+    NO_PROXY=${BUILD_NO_PROXY} \
+    pip install --no-cache-dir -r /tmp/requirements-tenant.txt && rm /tmp/requirements-tenant.txt
+
+RUN HTTP_PROXY=${PROXY_URL} HTTPS_PROXY=${PROXY_URL} http_proxy=${PROXY_URL} https_proxy=${PROXY_URL} \
+    apt-get update -qq && \
+    HTTP_PROXY=${PROXY_URL} HTTPS_PROXY=${PROXY_URL} http_proxy=${PROXY_URL} https_proxy=${PROXY_URL} \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /home/openstar/.hermes && \
+    chown -R openstar:openstar /home/openstar
+
+# Code is bind-mounted at /opt/hermes-agent (read-only).
+# PYTHONPATH ensures imports resolve from the mounted code directory.
+ENV PYTHONPATH=/opt/hermes-agent
+
+USER openstar
+
+# The tenant container is a pure exec target — the agent runs on the host and
+# dispatches commands into this container via `docker exec`.  The container
+# stays alive between turns; idle cleanup is handled externally.
+# Use CMD (not ENTRYPOINT) so DockerEnvironment can override it.
+CMD ["sleep", "infinity"]

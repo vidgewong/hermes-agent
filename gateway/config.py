@@ -658,6 +658,10 @@ class GatewayConfig:
     # gateway behaves exactly as before — single HERMES_HOME, no profile stamping.
     multiplex_profiles: bool = False
 
+    # Multi-tenant config (loaded from gateway.multi_tenant in config.yaml).
+    multi_tenant_enabled: bool = False
+    multi_tenant_database_url: str = ""
+
     # Unauthorized DM policy
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
 
@@ -853,6 +857,16 @@ class GatewayConfig:
         except (TypeError, ValueError):
             session_store_max_age_days = 90
 
+        # Multi-tenant config (from gateway.multi_tenant section)
+        _mt = nested_gateway.get("multi_tenant", {}) if isinstance(nested_gateway, dict) else {}
+        multi_tenant_enabled = _coerce_bool(_mt.get("enabled"), False)
+        multi_tenant_database_url = str(_mt.get("database_url") or "")
+        if multi_tenant_enabled and not multi_tenant_database_url:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "gateway.multi_tenant.enabled=true but database_url is empty"
+            )
+
         return cls(
             platforms=platforms,
             default_reset_policy=default_policy,
@@ -871,6 +885,8 @@ class GatewayConfig:
             group_sessions_per_user=_coerce_bool(group_sessions_per_user, True),
             thread_sessions_per_user=_coerce_bool(thread_sessions_per_user, False),
             multiplex_profiles=_coerce_bool(multiplex_profiles, False),
+            multi_tenant_enabled=multi_tenant_enabled,
+            multi_tenant_database_url=multi_tenant_database_url,
             max_concurrent_sessions=max_concurrent_sessions,
             unauthorized_dm_behavior=unauthorized_dm_behavior,
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),

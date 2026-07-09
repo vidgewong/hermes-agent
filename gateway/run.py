@@ -2818,6 +2818,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
         )
         self.delivery_router = DeliveryRouter(self.config)
+
+        # Multi-tenant identity resolver (Phase 2+3). Initialized lazily on
+        # first message when gateway.multi_tenant.enabled is true.
+        self._tenant_resolver = None
+        self._tenant_registry = None
+        self._tenant_init_done = False
+        # Cache: profile_name → {uid, username} resolved during _resolve_tenant_identity
+        self._tenant_user_cache: Dict[str, dict] = {}
         self._running = False
         self._gateway_loop: Optional[asyncio.AbstractEventLoop] = None
         self._shutdown_event = asyncio.Event()
@@ -8792,6 +8800,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     self.pairing_store._record_rate_limit(platform_name, source.user_id)
             return None
         
+        # Multi-tenant identity resolution (Phase 3). When enabled, this
+        # resolves the sender's IM identity to a user/profile BEFORE session
+        # creation. It replaces/supplements the standard auth check for
+        # multi-tenant mode. DM-only: group messages pass through unaffected.
+        if not is_internal:
+            try:
+                _tenant_resolved, _tenant_profile, _tenant_reject = (
+                    await self._resolve_tenant_identity(event)
+                )
+                if _tenant_resolved:
+                    if _tenant_reject:
+                        adapter = self._adapter_for_source(source)
+                        if adapter:
+                            await adapter.send(source.chat_id, _tenant_reject)
+                        return None
+                    if _tenant_profile:
+                        import dataclasses as _dc
+                        source = _dc.replace(source, profile=_tenant_profile)
+                        event = _dc.replace(event, source=source)
+            except Exception:
+                logger.debug("tenant identity resolution failed", exc_info=True)
+
         # Intercept messages that are responses to a pending /update prompt.
         # The update process (detached) wrote .update_prompt.json; the watcher
         # forwarded it to the user; now the user's reply goes back via
@@ -11263,6 +11293,19 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     await _sc_adapter._stream_card_start(source.chat_id, session_key)
             except Exception:
                 pass
+
+            # Multi-tenant environment hint: tell the agent it's in a sandboxed
+            # container so it uses correct paths (not host paths).
+            if source.profile and self._tenant_resolver is not None:
+                _tenant_username = self._tenant_user_cache.get(source.profile, {}).get("username", "")
+                _tenant_env_hint = (
+                    f"\n\n[Environment: You are running inside an isolated container. "
+                    f"Your working directory is /home/{_tenant_username}/workspace. "
+                    f"All file operations (read, write, terminal) execute in the container. "
+                    f"Do NOT use /home/wanyuzh or host paths — they do not exist here. "
+                    f"Use ~/workspace/ or /home/{_tenant_username}/workspace/ for all files.]"
+                )
+                context_prompt = (context_prompt or "") + _tenant_env_hint
 
             # Run the agent. Capture the session id that this run was launched
             # against so post-run compression publication can be identity-guarded
@@ -16469,14 +16512,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     ) -> Dict[str, Any]:
         """Profile-scoping wrapper around the agent run.
 
-        When multiplexing is active, resolve the inbound source's profile and
-        run the whole turn inside ``_profile_runtime_scope`` so config/skills/
-        memory resolve to that profile's home AND credentials resolve from that
-        profile's secret scope (never the process-global ``os.environ``). When
-        multiplexing is off this is a transparent pass-through — zero behavior
-        change for single-profile gateways.
+        When multiplexing or multi-tenant is active, resolve the inbound
+        source's profile and run the whole turn inside ``_profile_runtime_scope``
+        so config/skills/memory resolve to that profile's home AND credentials
+        resolve from that profile's secret scope (never the process-global
+        ``os.environ``). When both are off this is a transparent pass-through —
+        zero behavior change for single-profile gateways.
         """
-        if not getattr(getattr(self, "config", None), "multiplex_profiles", False):
+        _needs_scoping = (
+            getattr(getattr(self, "config", None), "multiplex_profiles", False)
+            or (self._tenant_resolver is not None and source.profile)
+        )
+        if not _needs_scoping:
             return await self._run_agent_inner(
                 message, context_prompt, history, source, session_id,
                 session_key=session_key, run_generation=run_generation,
@@ -16511,6 +16558,148 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception:
             from hermes_constants import get_hermes_home
             return get_hermes_home()
+
+    # ------------------------------------------------------------------
+    # Multi-tenant identity resolution (Phase 3)
+    # ------------------------------------------------------------------
+
+    async def _ensure_tenant_init(self) -> bool:
+        """Lazily initialize the tenant registry + resolver on first use.
+
+        Returns True if multi-tenant is active and initialized.
+        """
+        if self._tenant_init_done:
+            return self._tenant_resolver is not None
+        self._tenant_init_done = True
+
+        try:
+            from hermes_cli.config import load_config
+            config = load_config()
+            mt_config = config.get("gateway", {}).get("multi_tenant", {})
+            if not mt_config.get("enabled"):
+                return False
+
+            database_url = mt_config.get("database_url", "")
+            if not database_url:
+                logger.warning("multi_tenant.enabled but no database_url configured")
+                return False
+
+            from gateway.tenant.db import init_db, get_session_factory
+            from gateway.tenant.provisioner import TenantProvisioner
+            from gateway.tenant.registry import UserRegistry
+            from gateway.tenant.resolver import TenantResolver
+
+            await init_db(database_url)
+            factory = get_session_factory()
+            self._tenant_registry = UserRegistry(factory)
+            self._tenant_provisioner = TenantProvisioner(self._tenant_registry, mt_config)
+            self._tenant_resolver = TenantResolver(
+                self._tenant_registry, mt_config, provisioner=self._tenant_provisioner
+            )
+            logger.info("Multi-tenant resolver initialized (db=%s)", database_url[:30] + "...")
+            return True
+        except Exception:
+            logger.error("Failed to initialize multi-tenant resolver", exc_info=True)
+            return False
+
+    async def _resolve_tenant_identity(self, event: MessageEvent) -> tuple:
+        """Resolve tenant identity for an inbound message.
+
+        Returns (resolved, profile_name, rejection_message):
+        - resolved=True, profile_name=str → tenant identified, scope to profile
+        - resolved=True, profile_name=None, rejection_msg → reject the message
+        - resolved=False → multi-tenant not active or not applicable, continue normally
+        """
+        if not await self._ensure_tenant_init():
+            return False, None, None
+
+        source = event.source
+        platform = source.platform.value if source.platform else "unknown"
+        platform_user_id = source.user_id or ""
+        chat_type = source.chat_type or "dm"
+
+        if not platform_user_id:
+            return False, None, None
+
+        user, profile_name, rejection = await self._tenant_resolver.resolve_or_register(
+            platform=platform,
+            platform_user_id=platform_user_id,
+            chat_type=chat_type,
+            platform_metadata={
+                "display_name": source.user_name,
+                "chat_id": source.chat_id,
+            },
+        )
+
+        if user is None and rejection is None:
+            return False, None, None
+
+        if rejection:
+            return True, None, rejection
+
+        # Cache user info for the sync container registration later.
+        # Ensure UID is allocated (async-safe here).
+        if user and profile_name:
+            uid = getattr(user, "container_uid", None)
+            if uid is None:
+                try:
+                    uid = await self._tenant_registry.allocate_container_uid(user.id)
+                except Exception:
+                    logger.debug("UID allocation failed for %s", user.username, exc_info=True)
+            self._tenant_user_cache[profile_name] = {
+                "uid": uid,
+                "username": user.username,
+            }
+
+        return True, profile_name, None
+
+    def _register_tenant_container_env_sync(self, profile_name: str, session_id: str) -> None:
+        """Register the shared tenant container for this session (sync).
+
+        Uses the single shared container with per-user Linux isolation.
+        Commands are dispatched via `docker exec --user <uid>`.
+        All DB lookups are done earlier in the async path and cached in
+        self._tenant_user_cache. This method only does subprocess calls.
+        """
+        from gateway.tenant.shared_container import (
+            CONTAINER_NAME,
+            ensure_running,
+        )
+        from tools.terminal_tool import register_task_env_overrides
+
+        # Use cached user info (populated during _resolve_tenant_identity)
+        cached = self._tenant_user_cache.get(profile_name)
+        if not cached or not cached.get("uid"):
+            logger.warning("No cached uid for profile %s, skipping container env", profile_name)
+            return
+
+        uid = cached["uid"]
+        username = cached["username"]
+        cwd = f"/home/{username}/workspace"
+
+        # Ensure the shared container is running.
+        # Pass a minimal user list for volume mounts — use cached data.
+        from types import SimpleNamespace
+        mock_users = []
+        for pname, info in self._tenant_user_cache.items():
+            if info.get("uid"):
+                u = SimpleNamespace(
+                    username=info["username"],
+                    container_uid=info["uid"],
+                    profiles=[SimpleNamespace(profile_name=pname, is_primary=True)],
+                )
+                mock_users.append(u)
+        ensure_running(mock_users)
+
+        # Register override: terminal_tool creates SharedDockerEnvironment
+        register_task_env_overrides(session_id, {
+            "env_type": "shared_docker",
+            "_container_key": f"tenant_shared_{username}",
+            "_shared_container": CONTAINER_NAME,
+            "_tenant_uid": uid,
+            "_tenant_username": username,
+            "cwd": cwd,
+        })
 
     async def _run_agent_inner(
         self,
@@ -17719,6 +17908,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 )
 
             turn_route = self._resolve_turn_agent_config(message, model, runtime_kwargs)
+
+            # Multi-tenant container isolation: when the source is scoped to a
+            # sub-profile (non-default), register a Docker environment override
+            # for this session so terminal + file tools execute in a container.
+            if source.profile and self._tenant_resolver is not None:
+                try:
+                    logger.info(
+                        "Registering tenant container env: profile=%s session=%s",
+                        source.profile, session_id,
+                    )
+                    self._register_tenant_container_env_sync(source.profile, session_id)
+                except Exception:
+                    logger.warning("tenant container env registration failed", exc_info=True)
+            elif source.profile:
+                logger.debug(
+                    "Tenant container skip: profile=%s resolver=%s",
+                    source.profile, self._tenant_resolver,
+                )
 
             # Check agent cache — reuse the AIAgent from the previous message
             # in this session to preserve the frozen system prompt and tool

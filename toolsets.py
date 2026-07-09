@@ -324,6 +324,15 @@ TOOLSETS = {
         "includes": []
     },
 
+    "tenant_admin": {
+        "description": "Multi-tenant user management (gated on admin profile)",
+        "tools": [
+            "user_list", "user_get", "user_create", "user_update",
+            "user_link_identity", "user_provision",
+        ],
+        "includes": []
+    },
+
 
     # Scenario-specific toolsets
     

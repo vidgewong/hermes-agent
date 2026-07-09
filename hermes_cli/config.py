@@ -2872,6 +2872,15 @@ DEFAULT_CONFIG = {
             # request flood. Set to 0 to disable the cap entirely.
             "max_concurrent_runs": 10,
         },
+
+        "multi_tenant": {
+            "enabled": False,
+            "database_url": "",
+            "auto_register": True,
+            "admin_profiles": ["default"],
+            "profile_template": None,
+            "container_idle_timeout": 3600,
+        },
     },
 
     # Real-time token streaming to messaging platforms (Telegram, Discord,
