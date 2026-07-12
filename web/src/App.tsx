@@ -93,6 +93,7 @@ import WebhooksPage from "@/pages/WebhooksPage";
 import SystemPage from "@/pages/SystemPage";
 import ChatPage from "@/pages/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
+import { MercedesStarfield } from "@/components/MercedesStarfield";
 import { RuntimeSwitcher } from "@/components/RuntimeSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
@@ -500,6 +501,7 @@ export default function App() {
         aria-hidden
         className="pointer-events-none fixed inset-0 z-0"
       >
+        <MercedesStarfield />
         <PluginSlot name="backdrop" />
       </div>
 
