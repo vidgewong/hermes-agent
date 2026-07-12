@@ -228,6 +228,36 @@ export const defaultLargeTheme: DashboardTheme = {
   },
 };
 
+export const mercedesBenzTheme: DashboardTheme = {
+  name: "mercedes-benz",
+  label: "Mercedes-Benz",
+  description: "Three-pointed stars scattered like a cosmos — premium dark silver",
+  palette: {
+    background: { hex: "#041c1c", alpha: 1 },
+    midground: { hex: "#ffe6cb", alpha: 1 },
+    foreground: { hex: "#ffffff", alpha: 0 },
+    warmGlow: "rgba(255, 189, 56, 0.35)",
+    noiseOpacity: 1,
+  },
+  typography: {
+    ...DEFAULT_TYPOGRAPHY,
+    fontSans: `"Inter", ${SYSTEM_SANS}`,
+    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`,
+    fontDisplay: `"Playfair Display", Georgia, serif`,
+    fontUrl:
+      "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Playfair+Display:wght@400;500;600;700&display=swap",
+    letterSpacing: "0.01em",
+  },
+  layout: {
+    ...DEFAULT_LAYOUT,
+    radius: "0.375rem",
+    density: "comfortable",
+  },
+  terminalBackground: "#000000",
+  terminalForeground: "#e8e8e8",
+  swatchColors: ["#041c1c", "#ffe6cb", "#ffbd38"],
+};
+
 export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
   default: defaultTheme,
   "default-large": defaultLargeTheme,
@@ -237,4 +267,5 @@ export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
   mono: monoTheme,
   cyberpunk: cyberpunkTheme,
   rose: roseTheme,
+  "mercedes-benz": mercedesBenzTheme,
 };
