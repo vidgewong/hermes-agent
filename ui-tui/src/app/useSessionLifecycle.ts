@@ -381,12 +381,16 @@ export function useSessionLifecycle(opts: UseSessionLifecycleOptions) {
 
           })
           .catch((e: Error) => {
-            sys(`error: ${e.message}`)
-            patchUiState({ status: 'ready' })
+            if (/session not found/i.test(e.message)) {
+              newSession()
+            } else {
+              sys(`error: ${e.message}`)
+              patchUiState({ status: 'ready' })
+            }
           })
       })
     },
-    [closeSession, colsRef, gw, panel, resetSession, rpc, scrollRef, setHistoryItems, setSessionStartedAt, sys]
+    [closeSession, colsRef, gw, newSession, panel, resetSession, rpc, scrollRef, setHistoryItems, setSessionStartedAt, sys]
   )
 
   const guardBusySessionSwitch = useCallback(
