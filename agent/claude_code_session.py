@@ -8,10 +8,48 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_enabled_plugins() -> list[dict[str, str]]:
+    """Read ~/.claude/settings.json and resolve enabled plugin paths.
+
+    Returns a list of SdkPluginConfig dicts: [{"type": "local", "path": "..."}]
+    """
+    settings_path = Path.home() / ".claude" / "settings.json"
+    installed_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+
+    if not settings_path.exists() or not installed_path.exists():
+        return []
+
+    try:
+        settings = json.loads(settings_path.read_text())
+        installed = json.loads(installed_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    enabled_plugins = settings.get("enabledPlugins", {})
+    installed_plugins = installed.get("plugins", {})
+
+    result = []
+    for plugin_key, is_enabled in enabled_plugins.items():
+        if not is_enabled:
+            continue
+        installs = installed_plugins.get(plugin_key)
+        if not installs:
+            continue
+        # Use the first (most recent) installation entry
+        install_info = installs[0] if isinstance(installs, list) else installs
+        install_path = install_info.get("installPath", "")
+        if install_path and os.path.isdir(install_path):
+            result.append({"type": "local", "path": install_path})
+
+    return result
 
 
 
@@ -186,15 +224,12 @@ class ClaudeCodeSession:
             "LSP", "NotebookEdit", "ToolSearch",
             # Other built-ins not needed
             "ReportFindings",
-            # Block Claude Code's built-in Skill tool — it only searches
-            # ~/.claude/skills/ and knows nothing about ~/.hermes/skills/.
-            # Hermes skills are accessible via mcp__hermes-tools__skill_view,
-            # skills_list, and skill_manage instead.
-            "Skill",
             # NOT blocked (enabled):
             # - AskUserQuestion: bridged via canUseTool callback to Hermes gateway/TUI
             # - Agent: SDK native subagents, coexists with delegate_task
             # - Monitor: background process watching, runs within CLI subprocess
+            # - Skill: needed for plugin-provided skills; Hermes skills are also
+            #   synced to ~/.agents/skills/ via SkillGateway so both coexist.
         ]
         # Build canUseTool callback that bridges AskUserQuestion to Hermes
         from agent.ask_user_bridge import can_use_tool_callback as _ask_user_cb
@@ -212,18 +247,24 @@ class ClaudeCodeSession:
             logger.debug("sdk subagent profiles unavailable", exc_info=True)
             _agents = None
 
+        # Resolve Claude Code plugins from ~/.claude/settings.json
+        _plugins = _resolve_enabled_plugins()
+        if _plugins:
+            logger.debug("loading %d Claude Code plugin(s)", len(_plugins))
+
         options = ClaudeAgentOptions(
             model=sdk_model,
             system_prompt=_sdk_system_prompt,
             cwd=self._cwd,
             permission_mode="bypassPermissions",
-            allowed_tools=[*(self._allowed_tools or []), "Agent", "Monitor"],
+            allowed_tools=[*(self._allowed_tools or []), "Agent", "Monitor", "Skill"],
             disallowed_tools=_builtin_tools_to_block,
             mcp_servers=self._mcp_servers,
             max_turns=self._max_turns,
             resume=self._resume,
             can_use_tool=_can_use_tool,
             agents=_agents,
+            plugins=_plugins,
             include_partial_messages=True,
             include_hook_events=True,
             env=env,
