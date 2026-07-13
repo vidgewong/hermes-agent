@@ -16,38 +16,64 @@ from typing import Any, Callable, Optional
 logger = logging.getLogger(__name__)
 
 
+def _resolve_claude_home() -> Path:
+    """Resolve the .claude config directory.
+
+    Checks CLAUDE_HOME env var first, then falls back to ~/.claude.
+    In container environments HOME may not match where .claude actually lives.
+    """
+    env_home = os.environ.get("CLAUDE_HOME")
+    if env_home:
+        return Path(env_home)
+    return Path.home() / ".claude"
+
+
 def _resolve_enabled_plugins() -> list[dict[str, str]]:
-    """Read ~/.claude/settings.json and resolve enabled plugin paths.
+    """Resolve installed plugin paths for the SDK plugins option.
+
+    Loads all installed plugins from installed_plugins.json (no settings.json
+    enabledPlugins gate — in container/agent contexts all installed plugins
+    are considered enabled). Remaps installPath from the original host path
+    to the actual .claude directory in the current environment.
 
     Returns a list of SdkPluginConfig dicts: [{"type": "local", "path": "..."}]
     """
-    settings_path = Path.home() / ".claude" / "settings.json"
-    installed_path = Path.home() / ".claude" / "plugins" / "installed_plugins.json"
+    claude_home = _resolve_claude_home()
+    installed_path = claude_home / "plugins" / "installed_plugins.json"
 
-    if not settings_path.exists() or not installed_path.exists():
+    if not installed_path.exists():
         return []
 
     try:
-        settings = json.loads(settings_path.read_text())
         installed = json.loads(installed_path.read_text())
     except (json.JSONDecodeError, OSError):
         return []
 
-    enabled_plugins = settings.get("enabledPlugins", {})
     installed_plugins = installed.get("plugins", {})
+    plugins_dir = claude_home / "plugins"
 
     result = []
-    for plugin_key, is_enabled in enabled_plugins.items():
-        if not is_enabled:
-            continue
-        installs = installed_plugins.get(plugin_key)
+    for _plugin_key, installs in installed_plugins.items():
         if not installs:
             continue
-        # Use the first (most recent) installation entry
         install_info = installs[0] if isinstance(installs, list) else installs
         install_path = install_info.get("installPath", "")
-        if install_path and os.path.isdir(install_path):
-            result.append({"type": "local", "path": install_path})
+        if not install_path:
+            continue
+
+        # Remap: the recorded path may reference the original host's home.
+        # Extract the relative portion after ".claude/plugins/" and resolve
+        # it against the actual plugins directory in this environment.
+        marker = ".claude/plugins/"
+        idx = install_path.find(marker)
+        if idx != -1:
+            relative = install_path[idx + len(marker):]
+            resolved = plugins_dir / relative
+        else:
+            resolved = Path(install_path)
+
+        if resolved.is_dir():
+            result.append({"type": "local", "path": str(resolved)})
 
     return result
 
