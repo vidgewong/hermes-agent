@@ -70,22 +70,44 @@ export function useChatMessages(
     }
   }, [sessionId, profile]);
 
+  // On mount / sessionId change: check if the session is still active so we
+  // can show a streaming indicator immediately while the WS reconnects.
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+
+    api.getSessionDetail(sessionId, profile)
+      .then((info) => {
+        if (cancelled) return;
+        if (info.is_active) setIsStreaming(true);
+      })
+      .catch(() => {});
+
+    return () => { cancelled = true; };
+  }, [sessionId, profile]);
+
   // On mount / sessionId change: fetch immediately, then poll a few more times
   // to catch responses that were still streaming when we switched away.
+  // After the final poll, clear any stale isStreaming flag in case message_end
+  // was missed while the component was unmounted.
   useEffect(() => {
     if (!sessionId) return;
     let cancelled = false;
 
     const POLL_INTERVALS = [0, 1000, 2000, 4000, 8000];
+    const last = POLL_INTERVALS[POLL_INTERVALS.length - 1];
 
     POLL_INTERVALS.forEach((delay) => {
-      setTimeout(() => {
-        if (!cancelled) fetchMessages();
+      setTimeout(async () => {
+        if (cancelled) return;
+        await fetchMessages();
+        if (!cancelled && delay === last) {
+          setIsStreaming(false);
+        }
       }, delay);
     });
 
     return () => { cancelled = true; };
-  // fetchMessages identity already captures sessionId + profile
   }, [fetchMessages, sessionId]);
 
   // Connect WebSocket for streaming — rebuilt whenever sessionId or profile changes.
