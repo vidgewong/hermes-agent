@@ -70,11 +70,25 @@ export function useChatMessages(
     }
   }, [sessionId, profile]);
 
+  // On mount / sessionId change: fetch immediately, then poll a few more times
+  // to catch responses that were still streaming when we switched away.
   useEffect(() => {
-    fetchMessages();
-  }, [fetchMessages]);
+    if (!sessionId) return;
+    let cancelled = false;
 
-  // Connect WebSocket for streaming
+    const POLL_INTERVALS = [0, 1000, 2000, 4000, 8000];
+
+    POLL_INTERVALS.forEach((delay) => {
+      setTimeout(() => {
+        if (!cancelled) fetchMessages();
+      }, delay);
+    });
+
+    return () => { cancelled = true; };
+  // fetchMessages identity already captures sessionId + profile
+  }, [fetchMessages, sessionId]);
+
+  // Connect WebSocket for streaming — rebuilt whenever sessionId or profile changes.
   useEffect(() => {
     let ws: WebSocket | null = null;
     let cancelled = false;
@@ -99,7 +113,6 @@ export function useChatMessages(
       ws.onclose = () => {
         wsRef.current = null;
         if (!cancelled) {
-          // Reconnect after delay
           setTimeout(() => {
             if (!cancelled) connect();
           }, 3000);
@@ -118,7 +131,8 @@ export function useChatMessages(
       ws?.close();
       wsRef.current = null;
     };
-  }, [profile]);
+  // Re-connect when sessionId changes so the WS is always bound to the current session.
+  }, [profile, sessionId]);
 
   const handleStreamEvent = useCallback((event: StreamEvent & Record<string, unknown>) => {
     switch (event.type) {
