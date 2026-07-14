@@ -83,19 +83,35 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     [titleScope],
   );
 
+  const [sessionListNonce, setSessionListNonce] = useState(0);
+  const refreshSessionList = useCallback(() => setSessionListNonce((n) => n + 1), []);
+
   const startFreshDashboardChat = useCallback(() => {
     const next = new URLSearchParams(searchParams);
     next.delete("resume");
     setSearchParams(next, { replace: true });
     setBanner(null);
     setReconnectNonce((n) => n + 1);
-  }, [searchParams, setSearchParams]);
+    refreshSessionList();
+  }, [searchParams, setSearchParams, refreshSessionList]);
 
   const handleReconnectNonceChange = useCallback(() => {
     setReconnectNonce((n) => n + 1);
   }, []);
 
   const handleSessionEnd = useCallback(() => {}, []);
+
+  const handleImSessionCreated = useCallback((id: string) => {
+    setSearchParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        next.set("resume", id);
+        return next;
+      },
+      { replace: true },
+    );
+    refreshSessionList();
+  }, [setSearchParams, refreshSessionList]);
 
 
   useEffect(() => {
@@ -271,6 +287,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
               />
             </div>
             <ChatSessionList
+              key={sessionListNonce}
               activeSessionId={resumeParam}
               profile={scopedProfile}
               onPicked={closeMobilePanel}
@@ -312,9 +329,11 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
             />
           ) : (
             <ConversationalView
+              key={`${reconnectNonce}-${resumeParam ?? "new"}`}
               isActive={isActive}
               sessionId={resumeParam}
               profile={scopedProfile}
+              onSessionCreated={handleImSessionCreated}
             />
           )}
         </div>
@@ -337,6 +356,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
 
             <div className="min-h-0 flex-1 overflow-hidden">
               <ChatSessionList
+                key={sessionListNonce}
                 activeSessionId={resumeParam}
                 profile={scopedProfile}
                 onNewChat={startFreshDashboardChat}

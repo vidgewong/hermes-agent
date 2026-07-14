@@ -36,13 +36,19 @@ function convertSessionMessage(msg: SessionMessage, index: number): ChatMessage 
   };
 }
 
-export function useChatMessages(sessionId: string | null, profile: string) {
+export function useChatMessages(
+  sessionId: string | null,
+  profile: string,
+  onSessionCreated?: (id: string) => void,
+) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
+  const onSessionCreatedRef = useRef(onSessionCreated);
+  onSessionCreatedRef.current = onSessionCreated;
 
   const fetchMessages = useCallback(async () => {
     if (!sessionId) {
@@ -217,13 +223,16 @@ export function useChatMessages(sessionId: string | null, profile: string) {
       }
       case "message_end": {
         setIsStreaming(false);
+        const endedSessionId = (event as Record<string, unknown>).sessionId as string | undefined;
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           if (!last || !last.isStreaming) return prev;
           const updated = { ...last, isStreaming: false };
-          // If server sent sessionId, we could update URL
           return [...prev.slice(0, -1), updated];
         });
+        if (endedSessionId && !sessionIdRef.current) {
+          onSessionCreatedRef.current?.(endedSessionId);
+        }
         // Refresh from server to get canonical state
         setTimeout(() => fetchMessages(), 500);
         break;

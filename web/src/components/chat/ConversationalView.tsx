@@ -8,6 +8,7 @@ interface ConversationalViewProps {
   sessionId: string | null;
   profile: string;
   onSend?: (message: string) => void;
+  onSessionCreated?: (id: string) => void;
 }
 
 function MessageSkeleton() {
@@ -29,8 +30,9 @@ function MessageSkeleton() {
 export function ConversationalView({
   sessionId,
   profile,
+  onSessionCreated,
 }: ConversationalViewProps) {
-  const { messages, isStreaming, isLoading, sendMessage } = useChatMessages(sessionId, profile);
+  const { messages, isStreaming, isLoading, sendMessage } = useChatMessages(sessionId, profile, onSessionCreated);
 
   return (
     <div
