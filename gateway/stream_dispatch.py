@@ -74,6 +74,9 @@ class GatewayEventDispatcher:
         preview_max_len: int = 40,
         on_long_tool: Optional[Callable[[LongToolHint], None]] = None,
         on_notice: Optional[Callable[[GatewayNotice], None]] = None,
+        on_tool_start: Optional[Callable[[str, str], None]] = None,
+        on_tool_end: Optional[Callable[[str, bool, str], None]] = None,
+        on_text_chunk: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.adapter = adapter
         self.sink = sink
@@ -82,6 +85,9 @@ class GatewayEventDispatcher:
         self.preview_max_len = preview_max_len
         self._on_long_tool = on_long_tool
         self._on_notice = on_notice
+        self._on_tool_start = on_tool_start   # (tool_name, input_preview) -> None
+        self._on_tool_end = on_tool_end       # (tool_name, ok, output_preview) -> None
+        self._on_text_chunk = on_text_chunk   # (text_delta) -> None
         # "new" mode dedup — only report when the tool changes.
         self._last_tool: Optional[str] = None
 
@@ -94,12 +100,30 @@ class GatewayEventDispatcher:
 
     def _dispatch(self, event: StreamEvent) -> None:
         if isinstance(event, (MessageChunk, MessageStop, Commentary)):
+            if self._on_text_chunk is not None and isinstance(event, MessageChunk):
+                self._on_text_chunk(event.text)
             if self.sink is not None:
                 self.adapter.render_message_event(event, self.sink)
             return
 
         if isinstance(event, ToolCallChunk):
+            # Feed stream card hook (input preview from args/preview)
+            if self._on_tool_start is not None:
+                input_prev = event.preview or ""
+                if not input_prev and event.args:
+                    # Build a concise input preview from args dict
+                    import json as _json
+                    try:
+                        input_prev = _json.dumps(event.args, ensure_ascii=False)[:300]
+                    except Exception:
+                        pass
+                if self._last_tool != event.tool_name or not self._last_tool:
+                    self._on_tool_start(event.tool_name, input_prev)
+
             if self.tool_mode == "off" or self._enqueue_tool_line is None:
+                # "new" mode dedup still needs to track last tool even when no line emitted
+                if self.tool_mode == "new":
+                    self._last_tool = event.tool_name
                 return
             # "new" mode: only emit when the tool changes.
             if self.tool_mode == "new" and event.tool_name == self._last_tool:
@@ -114,6 +138,8 @@ class GatewayEventDispatcher:
             return
 
         if isinstance(event, ToolCallFinished):
+            if self._on_tool_end is not None:
+                self._on_tool_end(event.tool_name, event.ok, "")
             # Default: no chrome on completion (matches today — the gateway only
             # rendered "started" events).  Completion drives onboarding hints.
             return

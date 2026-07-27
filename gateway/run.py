@@ -11256,6 +11256,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
+            # Stream card turn start (Feishu rich progress card)
+            try:
+                _sc_adapter = self._adapter_for_source(source)
+                if _sc_adapter is not None and hasattr(_sc_adapter, "_stream_card_start"):
+                    await _sc_adapter._stream_card_start(source.chat_id, session_key)
+            except Exception:
+                pass
+
             # Run the agent. Capture the session id that this run was launched
             # against so post-run compression publication can be identity-guarded
             # below; a /new or another lifecycle transition may move
@@ -11281,6 +11289,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _typing_adapter = self._adapter_for_source(source)
                 if _typing_adapter and hasattr(_typing_adapter, "stop_typing"):
                     await _typing_adapter.stop_typing(source.chat_id)
+            except Exception:
+                pass
+
+            # Stream card turn finish (Feishu rich progress card)
+            try:
+                _sc_adapter = self._adapter_for_source(source)
+                if _sc_adapter is not None and hasattr(_sc_adapter, "_stream_card_finish"):
+                    _turn_ok = agent_result is not None and not agent_result.get("error")
+                    await _sc_adapter._stream_card_finish(session_key, ok=bool(_turn_ok))
             except Exception:
                 pass
 
@@ -16751,6 +16768,39 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
         def progress_callback(event_type: str, tool_name: str = None, preview: str = None, args: dict = None, **kwargs):
             """Callback invoked by agent on tool lifecycle events."""
+            # Stream card hook — feed tool lifecycle into Feishu stream card
+            # if the current adapter supports it (FeishuStreamCardMixin).
+            try:
+                _sc_adapter = self._adapter_for_source(source)
+                if _sc_adapter is not None and hasattr(_sc_adapter, "_stream_card_tool_start"):
+                    _sc_session_key = getattr(source, "session_key", None) or str(source)
+                    if event_type == "tool.started" and tool_name and tool_name != "_thinking":
+                        _input_prev = preview or ""
+                        if not _input_prev and args:
+                            import json as _j
+                            try:
+                                _cmd = args.get("command") or args.get("query") or args.get("input", "")
+                                _input_prev = str(_cmd)[:300] if _cmd else _j.dumps(args, ensure_ascii=False)[:300]
+                            except Exception:
+                                pass
+                        from agent.async_utils import safe_schedule_threadsafe
+                        safe_schedule_threadsafe(
+                            _sc_adapter._stream_card_tool_start(_sc_session_key, tool_name, _input_prev),
+                            _loop_for_step, logger=logger,
+                            log_message="stream_card tool_start scheduling error",
+                        )
+                    elif event_type == "tool.completed" and tool_name and tool_name != "_thinking":
+                        _ok = kwargs.get("ok", True)
+                        _output = str(kwargs.get("output") or kwargs.get("result") or "")[:800]
+                        from agent.async_utils import safe_schedule_threadsafe
+                        safe_schedule_threadsafe(
+                            _sc_adapter._stream_card_tool_end(_sc_session_key, tool_name, _ok, output_preview=_output),
+                            _loop_for_step, logger=logger,
+                            log_message="stream_card tool_end scheduling error",
+                        )
+            except Exception:
+                pass
+
             # "log" mode: append tool.started lines to the log queue and stay
             # silent in chat. Handled before the progress_queue guard because
             # log mode runs without a chat progress queue.
@@ -17629,6 +17679,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             def _stream_delta_cb(text: str) -> None:
                                 if _run_still_current():
                                     _stream_consumer.on_delta(text)
+                                    # Feed stream card text updates (Feishu streaming card)
+                                    try:
+                                        _sc_a = self._adapter_for_source(source)
+                                        if _sc_a is not None and hasattr(_sc_a, "_stream_card_text"):
+                                            _sc_sk = getattr(source, "session_key", None) or str(source)
+                                            safe_schedule_threadsafe(
+                                                _sc_a._stream_card_text(_sc_sk, text),
+                                                _loop_for_step, logger=logger,
+                                                log_message="stream_card text scheduling error",
+                                            )
+                                    except Exception:
+                                        pass
                         stream_consumer_holder[0] = _stream_consumer
                 except Exception as _sc_err:
                     logger.debug("Could not set up stream consumer: %s", _sc_err)
