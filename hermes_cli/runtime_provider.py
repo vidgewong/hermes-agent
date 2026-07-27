@@ -406,7 +406,7 @@ def _maybe_apply_claude_code_sdk_runtime(
     Returns the (possibly-rewritten) api_mode."""
     if not model_cfg:
         return api_mode
-    _COMPATIBLE_PROVIDERS = {"anthropic", "bedrock", "vertex", "claude-code", ""}
+    _COMPATIBLE_PROVIDERS = {"anthropic", "bedrock", "vertex", "claude-code", "custom", ""}
     if provider not in _COMPATIBLE_PROVIDERS:
         return api_mode
     runtime = str(model_cfg.get("claude_code_runtime") or "").strip().lower()
@@ -1567,6 +1567,61 @@ def resolve_runtime_provider(
             "requested_provider": requested_provider,
         }
 
+    # Claude Code SDK short-circuit: when claude_code_runtime == "claude_code_sdk"
+    # is set in config.yaml, resolve the provider credentials normally (so
+    # custom_providers entries are honoured) then force api_mode to
+    # "claude_code_sdk". The SDK subprocess manages its own auth via env vars
+    # forwarded by claude_code_provider_bridge.py.
+    #
+    # Only intercepts the main-agent path (requested=None). Explicit requests
+    # (e.g. auxiliary_client asking for "custom" to build an OpenAI client for
+    # title generation) must resolve normally and get a usable api_key + base_url.
+    #
+    # Bedrock and Vertex are excluded — they have their own SDK override via
+    # _maybe_apply_claude_code_sdk_runtime() at the end of their sections,
+    # which preserves their provider-specific runtime dict (region, bearer
+    # token, guardrails, etc.) that the generic custom-provider path would lose.
+    _model_cfg_for_sdk = _get_model_config()
+    _sdk_requested_provider = requested_provider or str(_model_cfg_for_sdk.get("provider") or "").strip()
+    if (
+        requested is None
+        and _sdk_requested_provider not in ("bedrock", "vertex", "aws", "aws-bedrock", "amazon-bedrock", "amazon")
+        and str(_model_cfg_for_sdk.get("claude_code_runtime") or "").strip().lower() == "claude_code_sdk"
+    ):
+        # config.yaml may have bare `provider: custom` with no base_url, which
+        # falls through to OpenRouter. Recover the real custom_providers identity:
+        # 1. try canonical_custom_identity (reverse-lookup by base_url or provider)
+        # 2. scan custom_providers for the first entry with credentials
+        _identity = requested_provider
+        if _identity in ("custom", "auto", ""):
+            _cfg_base = str(_model_cfg_for_sdk.get("base_url") or "").strip()
+            _cfg_provider = str(_model_cfg_for_sdk.get("provider") or "").strip()
+            _identity = canonical_custom_identity(
+                base_url=_cfg_base or None,
+                config_provider=_cfg_provider,
+            ) or _identity
+        if _identity in ("custom", "auto", ""):
+            try:
+                from hermes_cli.config import get_compatible_custom_providers, load_config as _lc
+                for _entry in get_compatible_custom_providers(_lc()) or []:
+                    _name = _normalize_custom_provider_name((_entry.get("name") or "").strip())
+                    if _name:
+                        _candidate = _resolve_named_custom_runtime(requested_provider=_name)
+                        if _candidate and _candidate.get("api_key"):
+                            _identity = _name
+                            break
+            except Exception:
+                pass
+        _resolved = _resolve_named_custom_runtime(requested_provider=_identity) or {
+            "provider": "custom",
+            "base_url": str(_model_cfg_for_sdk.get("base_url") or "").strip(),
+            "api_key": str(_model_cfg_for_sdk.get("api_key") or "").strip(),
+            "source": "claude_code_sdk_direct",
+        }
+        _resolved["api_mode"] = "claude_code_sdk"
+        _resolved["requested_provider"] = requested_provider
+        return _resolved
+
     # Azure Anthropic short-circuit: when explicitly targeting an Azure endpoint
     # with provider="anthropic", bypass _resolve_named_custom_runtime (which would
     # return provider="custom" with chat_completions api_mode and no valid key).
@@ -1977,6 +2032,19 @@ def resolve_runtime_provider(
         # Region priority: config.yaml bedrock.region → env var → us-east-1
         region = (_bedrock_cfg.get("region") or "").strip() or resolve_bedrock_region()
         auth_source = resolve_aws_auth_env_var() or "aws-sdk-default-chain"
+        # Bearer token auth: config.yaml bedrock.bearer_token / bedrock.base_url
+        # take priority over env vars (AWS_BEARER_TOKEN_BEDROCK /
+        # ANTHROPIC_BEDROCK_BASE_URL). This allows centralized credential
+        # management through config.yaml without relying on env var inheritance
+        # across daemon/gateway processes.
+        _cfg_bearer = str(_bedrock_cfg.get("bearer_token") or "").strip()
+        _cfg_bedrock_base = str(_bedrock_cfg.get("base_url") or "").strip()
+        if not _cfg_bearer:
+            _cfg_bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "").strip()
+        if not _cfg_bedrock_base:
+            _cfg_bedrock_base = os.environ.get("ANTHROPIC_BEDROCK_BASE_URL", "").strip()
+        if _cfg_bearer:
+            auth_source = "bedrock-bearer-token"
         # Build guardrail config if configured
         _gr = _bedrock_cfg.get("guardrail", {})
         guardrail_config = None
@@ -1998,11 +2066,13 @@ def resolve_runtime_provider(
             runtime = {
                 "provider": "bedrock",
                 "api_mode": "anthropic_messages",
-                "base_url": f"https://bedrock-runtime.{region}.amazonaws.com",
+                "base_url": _cfg_bedrock_base or f"https://bedrock-runtime.{region}.amazonaws.com",
                 "api_key": "aws-sdk",
                 "source": auth_source,
                 "region": region,
                 "bedrock_anthropic": True,  # Signal to use AnthropicBedrock client
+                "bedrock_bearer_token": _cfg_bearer,
+                "bedrock_custom_base_url": _cfg_bedrock_base,
                 "requested_provider": requested_provider,
             }
         else:
@@ -2014,6 +2084,8 @@ def resolve_runtime_provider(
                 "api_key": "aws-sdk",
                 "source": auth_source,
                 "region": region,
+                "bedrock_bearer_token": _cfg_bearer,
+                "bedrock_custom_base_url": _cfg_bedrock_base,
                 "requested_provider": requested_provider,
             }
         if guardrail_config:

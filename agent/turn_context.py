@@ -154,12 +154,20 @@ def build_turn_context(
     # Tell auxiliary_client what the live main provider/model are for this turn.
     try:
         from agent.auxiliary_client import set_runtime_main
+        _aux_api_mode = getattr(agent, "api_mode", "") or ""
+        # claude_code_sdk is a Hermes-internal routing mode, not an API wire
+        # protocol. The auxiliary client builds OpenAI-compatible clients and
+        # doesn't understand it. Pass the actual protocol the endpoint speaks
+        # (chat_completions for LiteLLM/custom providers) so that title
+        # generation, compression, and other aux tasks can build working clients.
+        if _aux_api_mode == "claude_code_sdk":
+            _aux_api_mode = "chat_completions"
         set_runtime_main(
             getattr(agent, "provider", "") or "",
             getattr(agent, "model", "") or "",
             base_url=getattr(agent, "base_url", "") or "",
             api_key=getattr(agent, "api_key", "") or "",
-            api_mode=getattr(agent, "api_mode", "") or "",
+            api_mode=_aux_api_mode,
         )
     except Exception:
         pass

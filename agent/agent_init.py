@@ -741,10 +741,29 @@ def init_agent(
         _is_bedrock_anthropic = agent.provider == "bedrock"
         if _is_bedrock_anthropic:
             from agent.anthropic_adapter import build_anthropic_bedrock_client
+            # Resolve bearer token, custom base URL, and region from config.yaml.
+            _bedrock_bearer = None
+            _bedrock_custom_base = None
+            _cfg_region = None
+            try:
+                from hermes_cli.config import load_config as _load_cfg
+                _bedrock_cfg = _load_cfg().get("bedrock", {})
+                _bedrock_bearer = str(_bedrock_cfg.get("bearer_token") or "").strip() or None
+                _bedrock_custom_base = str(_bedrock_cfg.get("base_url") or "").strip() or None
+                _cfg_region = str(_bedrock_cfg.get("region") or "").strip() or None
+            except Exception:
+                pass
+            # Region priority: config.yaml → extracted from base_url → us-east-1
             _region_match = re.search(r"bedrock-runtime\.([a-z0-9-]+)\.", base_url or "")
-            _br_region = _region_match.group(1) if _region_match else "us-east-1"
+            _br_region = _cfg_region or (_region_match.group(1) if _region_match else "us-east-1")
             agent._bedrock_region = _br_region
-            agent._anthropic_client = build_anthropic_bedrock_client(_br_region)
+            agent._bedrock_bearer_token = _bedrock_bearer
+            agent._bedrock_custom_base_url = _bedrock_custom_base
+            agent._anthropic_client = build_anthropic_bedrock_client(
+                _br_region,
+                bearer_token=_bedrock_bearer,
+                custom_base_url=_bedrock_custom_base,
+            )
             agent._anthropic_api_key = "aws-sdk"
             agent._anthropic_base_url = base_url
             agent._is_anthropic_oauth = False
@@ -862,6 +881,18 @@ def init_agent(
         agent.base_url = "moa://local"
         if not agent.quiet_mode:
             print(f"🤖 AI Agent initialized with MoA preset: {agent.model}")
+    elif agent.api_mode == "claude_code_sdk":
+        # Claude Code SDK runtime — the SDK manages its own subprocess.
+        # No OpenAI/Anthropic client is needed here; ClaudeCodeSession
+        # is created lazily in claude_code_sdk_runtime.py on the first turn.
+        # Store credentials on the agent so set_runtime_main() in turn_context
+        # can register them with the auxiliary client (title gen, compression, etc.)
+        agent.client = None
+        agent._client_kwargs = {}
+        agent.api_key = api_key or ""
+        agent.base_url = base_url or ""
+        if not agent.quiet_mode:
+            print(f"🤖 AI Agent initialized with model: {agent.model} (Claude Code SDK runtime)")
     elif agent.api_mode == "bedrock_converse":
         # AWS Bedrock — uses boto3 directly, no OpenAI client needed.
         # Region is extracted from the base_url or defaults to us-east-1.

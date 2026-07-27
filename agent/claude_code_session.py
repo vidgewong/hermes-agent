@@ -8,10 +8,74 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_claude_home() -> Path:
+    """Resolve the .claude config directory.
+
+    Checks CLAUDE_HOME env var first, then falls back to ~/.claude.
+    In container environments HOME may not match where .claude actually lives.
+    """
+    env_home = os.environ.get("CLAUDE_HOME")
+    if env_home:
+        return Path(env_home)
+    return Path.home() / ".claude"
+
+
+def _resolve_enabled_plugins() -> list[dict[str, str]]:
+    """Resolve installed plugin paths for the SDK plugins option.
+
+    Loads all installed plugins from installed_plugins.json (no settings.json
+    enabledPlugins gate — in container/agent contexts all installed plugins
+    are considered enabled). Remaps installPath from the original host path
+    to the actual .claude directory in the current environment.
+
+    Returns a list of SdkPluginConfig dicts: [{"type": "local", "path": "..."}]
+    """
+    claude_home = _resolve_claude_home()
+    installed_path = claude_home / "plugins" / "installed_plugins.json"
+
+    if not installed_path.exists():
+        return []
+
+    try:
+        installed = json.loads(installed_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    installed_plugins = installed.get("plugins", {})
+    plugins_dir = claude_home / "plugins"
+
+    result = []
+    for _plugin_key, installs in installed_plugins.items():
+        if not installs:
+            continue
+        install_info = installs[0] if isinstance(installs, list) else installs
+        install_path = install_info.get("installPath", "")
+        if not install_path:
+            continue
+
+        # Remap: the recorded path may reference the original host's home.
+        # Extract the relative portion after ".claude/plugins/" and resolve
+        # it against the actual plugins directory in this environment.
+        marker = ".claude/plugins/"
+        idx = install_path.find(marker)
+        if idx != -1:
+            relative = install_path[idx + len(marker):]
+            resolved = plugins_dir / relative
+        else:
+            resolved = Path(install_path)
+
+        if resolved.is_dir():
+            result.append({"type": "local", "path": str(resolved)})
+
+    return result
 
 
 
@@ -46,7 +110,7 @@ class ClaudeCodeSession:
         model: str | None = None,
         system_prompt: str | None = None,
         allowed_tools: list[str] | None = None,
-        mcp_servers: dict[str, Any] | None = None,
+        mcp_servers: dict[str, Any] | Any | None = None,
         max_turns: int | None = None,
         extra_env: dict[str, str] | None = None,
         resume: str | None = None,
@@ -115,15 +179,41 @@ class ClaudeCodeSession:
         if "ANTHROPIC_MODEL" not in env:
             sdk_model = provider_config.model or self._model
 
+        # Sync Hermes memory to ~/.claude/CLAUDE.md and start a watcher
+        # for bidirectional live sync (either side can be edited).
+        try:
+            from agent.sync_translators.memory_sync import sync_hermes_to_claude, MemoryWatcher
+            sync_hermes_to_claude()
+            self._memory_watcher = MemoryWatcher()
+            self._memory_watcher.start()
+        except Exception:
+            logger.debug("memory sync failed", exc_info=True)
+
         # Use Claude Code's default system prompt as the base and append
         # Hermes' platform instructions (MEDIA: tags, messaging conventions,
         # skills index, memory, etc.) on top. This preserves Claude Code's
         # built-in tool behaviour while adding Hermes-specific guidance.
         # Passing a raw string as system_prompt would replace the default
         # entirely, causing Claude to lose file-delivery conventions.
+        _sdk_delegation_guidance = (
+            "\n\n## Delegation & User Interaction\n"
+            "You have TWO delegation mechanisms:\n"
+            "- **Agent tool** (built-in): for focused subtasks with context isolation and "
+            "tool restrictions. Subagents run independently and return a summary. Best for "
+            "code review, research, analysis, and parallel work.\n"
+            "- **delegate_task** (MCP tool): for Hermes-aware work that needs gateway "
+            "session routing, depth tracking, background result delivery, or access to "
+            "Hermes-specific state. Best for long-running background tasks and orchestrated workflows.\n\n"
+            "For **AskUserQuestion**: only ask when the decision genuinely requires user "
+            "input (ambiguous requirements, multiple valid approaches, destructive actions). "
+            "For routine decisions, proceed autonomously."
+        )
+        _combined_prompt = (
+            (self._system_prompt or "") + _sdk_delegation_guidance
+        )
         _sdk_system_prompt = (
-            {"type": "preset", "preset": "claude_code", "append": self._system_prompt}
-            if self._system_prompt
+            {"type": "preset", "preset": "claude_code", "append": _combined_prompt}
+            if _combined_prompt.strip()
             else None
         )
 
@@ -138,8 +228,8 @@ class ClaudeCodeSession:
         _builtin_tools_to_block = [
             # Shell / file — replaced by terminal, read_file, write_file, patch, search_files
             "Bash", "Read", "Write", "Edit", "Glob", "Grep",
-            # Agents / workflows — not needed; Hermes handles orchestration
-            "Agent", "Workflow",
+            # Workflow — Hermes owns orchestration; stays blocked intentionally
+            "Workflow",
             # Web — replaced by hermes web_search / web_extract
             "WebFetch",
             # Deferred built-ins — all replaced by hermes equivalents
@@ -149,22 +239,46 @@ class ClaudeCodeSession:
             "LSP", "NotebookEdit", "ToolSearch",
             # Other built-ins not needed
             "ReportFindings",
-            # Block Claude Code's built-in Skill tool — it only searches
-            # ~/.claude/skills/ and knows nothing about ~/.hermes/skills/.
-            # Hermes skills are accessible via mcp__hermes-tools__skill_view,
-            # skills_list, and skill_manage instead.
-            "Skill",
+            # NOT blocked (enabled):
+            # - AskUserQuestion: bridged via canUseTool callback to Hermes gateway/TUI
+            # - Agent: SDK native subagents, coexists with delegate_task
+            # - Monitor: background process watching, runs within CLI subprocess
+            # - Skill: needed for plugin-provided skills.
         ]
+        # Build canUseTool callback that bridges AskUserQuestion to Hermes
+        from agent.ask_user_bridge import can_use_tool_callback as _ask_user_cb
+
+        _agent_ref = self._agent
+
+        async def _can_use_tool(tool_name, input_data, context):
+            return await _ask_user_cb(tool_name, input_data, context, agent=_agent_ref)
+
+        # Build subagent definitions from Hermes profiles
+        try:
+            from agent.sdk_subagent_profiles import build_hermes_agent_definitions
+            _agents = build_hermes_agent_definitions()
+        except Exception:
+            logger.debug("sdk subagent profiles unavailable", exc_info=True)
+            _agents = None
+
+        # Resolve Claude Code plugins from ~/.claude/settings.json
+        _plugins = _resolve_enabled_plugins()
+        if _plugins:
+            logger.debug("loading %d Claude Code plugin(s)", len(_plugins))
+
         options = ClaudeAgentOptions(
             model=sdk_model,
             system_prompt=_sdk_system_prompt,
             cwd=self._cwd,
             permission_mode="bypassPermissions",
-            allowed_tools=self._allowed_tools or [],
+            allowed_tools=[*(self._allowed_tools or []), "Agent", "Monitor", "Skill"],
             disallowed_tools=_builtin_tools_to_block,
             mcp_servers=self._mcp_servers,
             max_turns=self._max_turns,
             resume=self._resume,
+            can_use_tool=_can_use_tool,
+            agents=_agents,
+            plugins=_plugins,
             include_partial_messages=True,
             include_hook_events=True,
             env=env,
@@ -417,6 +531,11 @@ class ClaudeCodeSession:
 
     async def close(self):
         """Disconnect and clean up."""
+        if hasattr(self, "_memory_watcher") and self._memory_watcher:
+            try:
+                self._memory_watcher.stop()
+            except Exception:
+                pass
         if self._client:
             try:
                 await self._client.disconnect()
