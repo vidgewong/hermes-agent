@@ -8347,6 +8347,8 @@ async def prune_sessions_endpoint(body: SessionPrune):
         db.close()
 
 
+
+
 # ---------------------------------------------------------------------------
 # Log viewer endpoint
 # ---------------------------------------------------------------------------
@@ -15214,6 +15216,282 @@ def _maybe_open_browser(
             pass
 
     threading.Thread(target=_open, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
+# /api/chat/stream — Structured chat WebSocket for the IM-style dashboard view.
+#
+# Unlike /api/pty (which tunnels raw PTY bytes), this endpoint exchanges JSON
+# frames with the frontend: the client sends user messages, the server streams
+# back structured events (message_start, content_delta, tool_use_start,
+# tool_use_delta, tool_result, message_end).
+# ---------------------------------------------------------------------------
+
+_CHAT_STREAM_AGENTS: Dict[str, Any] = {}
+_CHAT_STREAM_LOCK = threading.Lock()
+
+
+def _get_or_create_chat_agent(session_id: Optional[str], profile: Optional[str]):
+    """Get or create an AIAgent for the IM chat view."""
+    from hermes_cli.config import load_config
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from hermes_cli.tools_config import _get_platform_tools
+    from hermes_cli.oneshot import get_fallback_chain
+    from run_agent import AIAgent
+
+    cfg = load_config()
+
+    model_cfg = cfg.get("model") or {}
+    if isinstance(model_cfg, str):
+        cfg_model = model_cfg
+    else:
+        cfg_model = model_cfg.get("default") or model_cfg.get("model") or ""
+
+    env_model = os.getenv("HERMES_INFERENCE_MODEL", "").strip()
+    effective_model = env_model or cfg_model
+
+    runtime = resolve_runtime_provider(
+        requested=None,
+        target_model=effective_model or None,
+    )
+
+    toolsets_list = sorted(_get_platform_tools(cfg, "cli"))
+
+    from hermes_state import SessionDB
+    if profile:
+        _name, home = _cron_profile_home(profile)
+        session_db = SessionDB(db_path=Path(home) / "state.db")
+    else:
+        session_db = SessionDB()
+
+    _fb = get_fallback_chain(cfg)
+
+    agent = AIAgent(
+        api_key=runtime.get("api_key"),
+        base_url=runtime.get("base_url"),
+        provider=runtime.get("provider"),
+        api_mode=runtime.get("api_mode"),
+        model=effective_model,
+        enabled_toolsets=toolsets_list,
+        quiet_mode=True,
+        platform="dashboard-im",
+        session_db=session_db,
+        session_id=session_id,
+        credential_pool=runtime.get("credential_pool"),
+        fallback_model=_fb or None,
+    )
+    agent.suppress_status_output = True
+    return agent
+
+
+@app.websocket("/api/chat/stream")
+async def chat_stream_ws(ws: WebSocket) -> None:
+    """Structured chat WebSocket for the IM dashboard view."""
+    peer = ws.client.host if ws.client else "?"
+
+    # Auth checks (same as /api/pty)
+    auth_reason, cred = _ws_auth_reason(ws)
+    mode = _ws_auth_mode()
+    if auth_reason is not None:
+        await ws.close(code=4401, reason=_ws_close_reason(f"auth: {auth_reason}"))
+        return
+
+    host_origin_reason = _ws_host_origin_reason(ws)
+    if host_origin_reason is not None:
+        await ws.close(code=4403, reason=_ws_close_reason(host_origin_reason))
+        return
+
+    client_reason = _ws_client_reason(ws)
+    if client_reason is not None:
+        await ws.close(code=4408, reason=_ws_close_reason(client_reason))
+        return
+
+    await ws.accept()
+    _log.info("chat/stream accepted peer=%s mode=%s", peer, mode)
+
+    session_id = ws.query_params.get("session") or None
+    profile = ws.query_params.get("profile") or None
+
+    try:
+        while True:
+            data = await ws.receive_json()
+            msg_type = data.get("type")
+
+            if msg_type == "send_message":
+                user_message = data.get("content", "").strip()
+                if not user_message:
+                    await ws.send_json({"type": "error", "error": "Empty message"})
+                    continue
+
+                # Run agent in a thread to not block the event loop
+                await _handle_chat_message(ws, user_message, session_id, profile)
+
+            elif msg_type == "ping":
+                await ws.send_json({"type": "pong"})
+
+    except Exception as exc:
+        _log.debug("chat/stream closed: %s", exc)
+    finally:
+        pass
+
+
+async def _handle_chat_message(
+    ws: WebSocket,
+    user_message: str,
+    session_id: Optional[str],
+    profile: Optional[str],
+) -> None:
+    """Run a single agent turn and stream structured events back."""
+    import uuid as _uuid
+
+    message_id = str(_uuid.uuid4())
+    events_queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    # Send message_start
+    await ws.send_json({
+        "type": "message_start",
+        "messageId": message_id,
+        "role": "assistant",
+    })
+
+    def _stream_callback(delta):
+        if delta is None:
+            return
+        loop.call_soon_threadsafe(
+            events_queue.put_nowait,
+            {"type": "content_delta", "messageId": message_id, "delta": delta},
+        )
+
+    def _tool_start_callback(tool_call_id: str, tool_name: str, arguments: str):
+        loop.call_soon_threadsafe(
+            events_queue.put_nowait,
+            {
+                "type": "tool_use_start",
+                "messageId": message_id,
+                "toolCall": {
+                    "id": tool_call_id,
+                    "name": tool_name,
+                    "arguments": arguments,
+                    "status": "running",
+                },
+            },
+        )
+
+    def _tool_complete_callback(tool_call_id: str, tool_name: str, arguments: str, result: str):
+        loop.call_soon_threadsafe(
+            events_queue.put_nowait,
+            {
+                "type": "tool_result",
+                "messageId": message_id,
+                "toolCall": {
+                    "id": tool_call_id,
+                    "name": tool_name,
+                    "status": "done",
+                    "result": result,
+                },
+            },
+        )
+
+    def _tool_progress_callback(*args):
+        if len(args) >= 2:
+            tool_call_id = args[0]
+            progress = args[1]
+        else:
+            return
+        loop.call_soon_threadsafe(
+            events_queue.put_nowait,
+            {
+                "type": "tool_use_delta",
+                "messageId": message_id,
+                "toolCall": {"id": tool_call_id, "log": str(progress)},
+            },
+        )
+
+    def _run_agent():
+        try:
+            agent = _get_or_create_chat_agent(session_id, profile)
+            agent.stream_delta_callback = _stream_callback
+            agent.tool_start_callback = _tool_start_callback
+            agent.tool_complete_callback = _tool_complete_callback
+            agent.tool_progress_callback = _tool_progress_callback
+            result = agent.run_conversation(user_message)
+            final = result.get("final_response", "")
+            new_session_id = getattr(agent, "session_id", session_id)
+            loop.call_soon_threadsafe(
+                events_queue.put_nowait,
+                {
+                    "type": "message_end",
+                    "messageId": message_id,
+                    "sessionId": new_session_id,
+                    "finalContent": final,
+                },
+            )
+        except Exception as exc:
+            loop.call_soon_threadsafe(
+                events_queue.put_nowait,
+                {
+                    "type": "error",
+                    "messageId": message_id,
+                    "error": str(exc),
+                },
+            )
+
+    # Start agent in background thread
+    agent_task = loop.run_in_executor(None, _run_agent)
+
+    # Stream events to the client until the agent finishes
+    done = False
+    while not done:
+        try:
+            event = await asyncio.wait_for(events_queue.get(), timeout=0.5)
+            await ws.send_json(event)
+            if event.get("type") in ("message_end", "error"):
+                done = True
+        except asyncio.TimeoutError:
+            # Check if the agent thread is still running
+            if agent_task.done():
+                # Drain remaining events
+                while not events_queue.empty():
+                    event = events_queue.get_nowait()
+                    await ws.send_json(event)
+                    if event.get("type") in ("message_end", "error"):
+                        done = True
+                if not done:
+                    await ws.send_json({
+                        "type": "message_end",
+                        "messageId": message_id,
+                    })
+                    done = True
+
+
+# ---------------------------------------------------------------------------
+# /api/chat/send — HTTP POST endpoint for sending a message (non-streaming).
+# Returns the full response synchronously for simple integrations.
+# ---------------------------------------------------------------------------
+
+
+class _ChatSendBody(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    profile: Optional[str] = None
+
+
+@app.post("/api/chat/send")
+async def chat_send(body: _ChatSendBody):
+    """Send a message and get a complete response (non-streaming)."""
+
+    def _run():
+        agent = _get_or_create_chat_agent(body.session_id, body.profile)
+        result = agent.run_conversation(body.message)
+        new_session_id = getattr(agent, "session_id", body.session_id)
+        return {
+            "session_id": new_session_id,
+            "response": result.get("final_response", ""),
+        }
+
+    result = await asyncio.to_thread(_run)
+    return result
 
 
 def start_server(

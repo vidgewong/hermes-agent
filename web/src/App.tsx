@@ -21,7 +21,7 @@ import {
 import {
   Activity,
   BarChart3,
-  BookOpen,
+  Bot,
   Clock,
   Code,
   Cpu,
@@ -92,7 +92,6 @@ import WebhooksPage from "@/pages/WebhooksPage";
 import SystemPage from "@/pages/SystemPage";
 import ChatPage from "@/pages/ChatPage";
 import { LanguageSwitcher } from "@/components/LanguageSwitcher";
-import { RuntimeSwitcher } from "@/components/RuntimeSwitcher";
 import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { useI18n } from "@/i18n";
 import type { Translations } from "@/i18n/types";
@@ -193,17 +192,12 @@ const BUILTIN_NAV_REST: NavItem[] = [
   { path: "/config", labelKey: "config", label: "Config", icon: Settings },
   { path: "/env", labelKey: "keys", label: "Keys", icon: KeyRound },
   { path: "/system", label: "System", icon: Wrench },
-  {
-    path: "/docs",
-    labelKey: "documentation",
-    label: "Documentation",
-    icon: BookOpen,
-  },
 ];
 
 const ICON_MAP: Record<string, ComponentType<{ className?: string }>> = {
   Activity,
   BarChart3,
+  Bot,
   Clock,
   Cpu,
   FileText,
@@ -429,7 +423,12 @@ export default function App() {
 
   const builtinNav = useMemo(() => {
     const base = embeddedChat
-      ? [CHAT_NAV_ITEM, ...BUILTIN_NAV_REST]
+      ? (() => {
+          const rest = [...BUILTIN_NAV_REST];
+          const sessionsIdx = rest.findIndex((i) => i.path === "/sessions");
+          rest.splice(sessionsIdx >= 0 ? sessionsIdx + 1 : 0, 0, CHAT_NAV_ITEM);
+          return rest;
+        })()
       : BUILTIN_NAV_REST;
     return showTokenAnalytics
       ? base
@@ -576,10 +575,11 @@ export default function App() {
               >
                 <PluginSlot name="header-left" />
 
-                <Typography className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground uppercase">
+                <Typography
+                  className="font-bold text-[1.125rem] leading-[0.95] tracking-[0.0525rem] text-midground"
+                  style={{ mixBlendMode: "plus-lighter" }}
+                >
                   Hermes
-                  <br />
-                  Agent
                 </Typography>
               </div>
 
@@ -686,14 +686,6 @@ export default function App() {
                 )}
               >
                 <PluginSlot name="header-right" />
-
-                <SidebarIconWithTooltip
-                  collapsed={isDesktopCollapsed}
-                  label="Agent Core"
-                  tooltipWarmRef={tooltipWarmRef}
-                >
-                  <RuntimeSwitcher collapsed={isDesktopCollapsed} dropUp />
-                </SidebarIconWithTooltip>
 
                 <SidebarIconWithTooltip
                   collapsed={isDesktopCollapsed}

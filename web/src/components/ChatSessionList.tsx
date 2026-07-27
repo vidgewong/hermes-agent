@@ -115,6 +115,7 @@ export function ChatSessionList({
   const pick = useCallback(
     (id: string) => {
       onPicked?.();
+      load();
       if (id === activeSessionId) return;
       setSearchParams(
         (prev) => {
@@ -125,7 +126,7 @@ export function ChatSessionList({
         { replace: false },
       );
     },
-    [activeSessionId, onPicked, setSearchParams],
+    [activeSessionId, load, onPicked, setSearchParams],
   );
 
   // "New chat" prefers ChatPage's robust handler (clears resume + forces a

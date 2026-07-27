@@ -1,6 +1,7 @@
+import type React from "react";
 import { useState, useRef, useEffect, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { Cpu, Check } from "lucide-react";
+import { Cpu, Check, BotMessageSquare, CodeXml } from "lucide-react";
 import { Button } from "@nous-research/ui/ui/components/button";
 import { BottomSheet } from "@nous-research/ui/ui/components/bottom-sheet";
 import { Typography } from "@nous-research/ui/ui/components/typography/index";
@@ -23,12 +24,36 @@ const AGENT_CORES: AgentCoreOption[] = [
   { id: "codex_app_server", label: "Codex", description: "OpenAI Codex runtime" },
 ];
 
+const BADGE_STYLES: Record<AgentCoreId, {
+  label: string;
+  icon: React.ComponentType<{ className?: string }>;
+  color: string;
+}> = {
+  native: {
+    label: "Hermes",
+    icon: Cpu,
+    color: "text-text-secondary bg-secondary/40 border-border",
+  },
+  claude_code_sdk: {
+    label: "Claude Code",
+    icon: BotMessageSquare,
+    color: "text-[#da7756] bg-[#da7756]/10 border-[#da7756]/30",
+  },
+  codex_app_server: {
+    label: "Codex",
+    icon: CodeXml,
+    color: "text-emerald-500 bg-emerald-500/10 border-emerald-500/30",
+  },
+};
+
 interface RuntimeSwitcherProps {
   collapsed?: boolean;
   dropUp?: boolean;
+  /** When true, renders as a compact vertical badge beside the composer instead of the toolbar button. */
+  badgeMode?: boolean;
 }
 
-export function RuntimeSwitcher({ collapsed = false, dropUp = false }: RuntimeSwitcherProps) {
+export function RuntimeSwitcher({ collapsed = false, dropUp = false, badgeMode = false }: RuntimeSwitcherProps) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [current, setCurrent] = useState<AgentCoreId>("native");
@@ -86,34 +111,56 @@ export function RuntimeSwitcher({ collapsed = false, dropUp = false }: RuntimeSw
   };
 
   const currentRuntime = AGENT_CORES.find((r) => r.id === current) ?? AGENT_CORES[0];
+  const badge = BADGE_STYLES[current];
   const sheetTitle = "Agent Core";
 
   return (
     <div ref={containerRef} className="relative inline-flex">
-      <Button
-        ghost
-        size={collapsed ? "icon" : undefined}
-        onClick={() => setOpen((o) => !o)}
-        disabled={loading}
-        className={cn(
-          collapsed
-            ? "text-text-secondary hover:text-foreground hover:bg-transparent"
-            : "px-2 py-1 normal-case tracking-normal font-normal text-xs text-text-secondary hover:text-foreground",
-        )}
-        title={`Agent Core: ${currentRuntime.label}`}
-        aria-label="Switch agent core"
-        aria-expanded={open}
-        aria-haspopup="listbox"
-      >
-        <span className="inline-flex items-center gap-1.5">
-          <Cpu className="h-3.5 w-3.5" />
-          {!collapsed && (
-            <Typography className="hidden sm:inline text-xs">
-              {currentRuntime.label}
-            </Typography>
+      {badgeMode ? (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          disabled={loading}
+          title={`Agent Core: ${currentRuntime.label} — click to switch`}
+          aria-label="Switch agent core"
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          className={cn(
+            "flex w-[4.5rem] shrink-0 flex-col items-center justify-center gap-1 rounded-lg border px-2",
+            "text-[9px] font-medium leading-none tracking-wide",
+            "transition-opacity hover:opacity-75",
+            badge.color,
           )}
-        </span>
-      </Button>
+        >
+          <badge.icon className="h-3.5 w-3.5 shrink-0" />
+          <span className="whitespace-nowrap">{badge.label}</span>
+        </button>
+      ) : (
+        <Button
+          ghost
+          size={collapsed ? "icon" : undefined}
+          onClick={() => setOpen((o) => !o)}
+          disabled={loading}
+          className={cn(
+            collapsed
+              ? "text-text-secondary hover:text-foreground hover:bg-transparent"
+              : "px-2 py-1 normal-case tracking-normal font-normal text-xs text-text-secondary hover:text-foreground",
+          )}
+          title={`Agent Core: ${currentRuntime.label}`}
+          aria-label="Switch agent core"
+          aria-expanded={open}
+          aria-haspopup="listbox"
+        >
+          <span className="inline-flex items-center gap-1.5">
+            <Cpu className="h-3.5 w-3.5" />
+            {!collapsed && (
+              <Typography className="hidden sm:inline text-xs">
+                {currentRuntime.label}
+              </Typography>
+            )}
+          </span>
+        </Button>
+      )}
 
       {useMobileSheet && (
         <BottomSheet
