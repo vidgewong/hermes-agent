@@ -370,6 +370,8 @@ class ChannelOverride:
     model: Optional[str] = None
     provider: Optional[str] = None
     system_prompt: Optional[str] = None
+    api_mode: Optional[str] = None
+    send_via: Optional[str] = None  # e.g. "lark_cli" to route outbound via App B
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
@@ -379,6 +381,10 @@ class ChannelOverride:
             out["provider"] = self.provider
         if self.system_prompt is not None:
             out["system_prompt"] = self.system_prompt
+        if self.api_mode is not None:
+            out["api_mode"] = self.api_mode
+        if self.send_via is not None:
+            out["send_via"] = self.send_via
         return out
 
     @classmethod
@@ -389,6 +395,8 @@ class ChannelOverride:
             model=data.get("model"),
             provider=data.get("provider"),
             system_prompt=data.get("system_prompt"),
+            api_mode=data.get("api_mode"),
+            send_via=data.get("send_via"),
         )
 
 

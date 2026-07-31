@@ -1892,6 +1892,35 @@ class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
     # Outbound — send / edit / send_image / send_voice / …
     # =========================================================================
 
+    async def _send_via_lark_cli(self, chat_id: str, content: str) -> SendResult:
+        """Send message via lark-cli (App B user token) for cross-org group chats."""
+        plain = _strip_markdown_to_plain_text(content)
+        chunks = self.truncate_message(plain, self.MAX_MESSAGE_LENGTH)
+
+        for chunk in chunks:
+            cmd = [
+                "lark-cli", "im", "+messages-send",
+                "--as", "user",
+                "--chat-id", chat_id,
+                "--text", chunk,
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _stdout, stderr = await proc.communicate()
+                if proc.returncode != 0:
+                    err = stderr.decode(errors="replace").strip()
+                    logger.error("[Feishu] lark-cli send failed (chat=%s): %s", chat_id, err)
+                    return SendResult(success=False, error=err)
+            except Exception as exc:
+                logger.error("[Feishu] lark-cli send error (chat=%s): %s", chat_id, exc)
+                return SendResult(success=False, error=str(exc))
+
+        return SendResult(success=True)
+
     async def send(
         self,
         chat_id: str,
@@ -1902,6 +1931,11 @@ class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
         """Send a Feishu message."""
         if not self._client:
             return SendResult(success=False, error="Not connected")
+
+        # Route to lark-cli (App B) if this channel has send_via = "lark_cli"
+        override = self.config.channel_overrides.get(chat_id) if self.config.channel_overrides else None
+        if override and getattr(override, "send_via", None) == "lark_cli":
+            return await self._send_via_lark_cli(chat_id, content)
 
         formatted = self.format_message(content)
         chunks = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
@@ -2692,14 +2726,24 @@ class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
             return
 
         message_id = getattr(message, "message_id", None)
+        chat_id = getattr(message, "chat_id", "") or ""
+        chat_type = getattr(message, "chat_type", "p2p")
+        sender_id_obj = getattr(sender, "sender_id", None)
+        sender_open_id = getattr(sender_id_obj, "open_id", "") or ""
+        logger.info(
+            "[Feishu] Inbound message: id=%s chat_type=%s chat_id=%s sender=%s",
+            message_id, chat_type, chat_id, sender_open_id,
+        )
+
         if not message_id or self._is_duplicate(message_id):
             logger.debug("[Feishu] Dropping duplicate/missing message_id: %s", message_id)
             return
 
         reason = self._admit(sender, message)
         if reason is not None:
-            logger.debug("[Feishu] dropping inbound event: %s", reason)
-            return
+            logger.info("[Feishu] Rejected inbound: id=%s reason=%s", message_id, reason)
+            if reason is not None:
+                return
 
         chat_type = getattr(message, "chat_type", "p2p")
         await self._process_inbound_message(
@@ -5797,15 +5841,19 @@ def interactive_setup() -> None:
 
 
 def _apply_yaml_config(yaml_cfg: dict, feishu_cfg: dict) -> dict | None:
-    """Translate config.yaml feishu: keys into FEISHU_* env vars.
+    """Translate config.yaml feishu: keys into FEISHU_* env vars and seed extra.
 
-    Implements the apply_yaml_config_fn contract (#24849). Mirrors the legacy
-    feishu_cfg block from gateway/config.py::load_gateway_config() (allow_bots).
-    Env vars take precedence over YAML. Returns None — flows through env.
+    Implements the apply_yaml_config_fn contract (#24849).  Keys returned in the
+    dict are merged into PlatformConfig.extra so _load_settings() can read them.
     """
     if "allow_bots" in feishu_cfg and not os.getenv("FEISHU_ALLOW_BOTS"):
         os.environ["FEISHU_ALLOW_BOTS"] = str(feishu_cfg["allow_bots"]).lower()
-    return None
+
+    seeded: dict = {}
+    for key in ("group_rules", "admins", "default_group_policy", "require_mention"):
+        if key in feishu_cfg:
+            seeded[key] = feishu_cfg[key]
+    return seeded or None
 
 
 def _is_connected(config) -> bool:

@@ -3791,6 +3791,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # did not specify an explicit model.
                     if ch_runtime_model and not ch.model:
                         model = ch_runtime_model
+                if ch.api_mode:
+                    runtime_kwargs["api_mode"] = ch.api_mode
+                    logger.info(
+                        "Channel override api_mode=%s for chat_id=%s",
+                        ch.api_mode, chat_id,
+                    )
 
         if override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
