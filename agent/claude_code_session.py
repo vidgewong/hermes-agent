@@ -28,7 +28,7 @@ def _resolve_claude_home() -> Path:
     return Path.home() / ".claude"
 
 
-def _resolve_enabled_plugins() -> list[dict[str, str]]:
+def _resolve_enabled_plugins(specialist_id: str | None = None) -> list[dict[str, str]]:
     """Resolve installed plugin paths for the SDK plugins option.
 
     Loads all installed plugins from installed_plugins.json (no settings.json
@@ -36,8 +36,14 @@ def _resolve_enabled_plugins() -> list[dict[str, str]]:
     are considered enabled). Remaps installPath from the original host path
     to the actual .claude directory in the current environment.
 
+    When specialist_id is set, returns an empty list — specialist sessions
+    operate without plugins to avoid polluting their isolated context.
+
     Returns a list of SdkPluginConfig dicts: [{"type": "local", "path": "..."}]
     """
+    if specialist_id:
+        return []
+
     claude_home = _resolve_claude_home()
     installed_path = claude_home / "plugins" / "installed_plugins.json"
 
@@ -116,9 +122,9 @@ class ClaudeCodeSession:
         resume: str | None = None,
         on_event: Callable[[dict[str, Any]], None] | None = None,
         on_stream_delta: Callable[[str], None] | None = None,
+        specialist_id: str | None = None,
     ):
         self._agent = agent
-        self._cwd = cwd
         self._model = model
         self._system_prompt = system_prompt
         self._allowed_tools = allowed_tools
@@ -128,8 +134,22 @@ class ClaudeCodeSession:
         self._resume = resume
         self._on_event = on_event
         self._on_stream_delta = on_stream_delta
+        self._specialist_id = specialist_id
         self._client = None
         self._session_id: str | None = None
+
+        # Specialist sessions use a dedicated cwd so Claude Code auto-discovers
+        # the specialist-specific CLAUDE.md rather than the master's.
+        if specialist_id:
+            from hermes_constants import get_hermes_home
+            specialist_dir = get_hermes_home() / ".claude-code" / "specialists" / specialist_id
+            if specialist_dir.exists() and (specialist_dir / "CLAUDE.md").exists():
+                self._cwd = str(specialist_dir)
+            else:
+                # Fallback: no specialist CLAUDE.md deployed yet, use normal cwd
+                self._cwd = cwd
+        else:
+            self._cwd = cwd
 
     async def _ensure_client(self):
         """Lazily create and connect the SDK client."""
@@ -179,26 +199,26 @@ class ClaudeCodeSession:
         if "ANTHROPIC_MODEL" not in env:
             sdk_model = provider_config.model or self._model
 
-        # Reconcile Hermes skills into ~/.agents/skills/ so Claude Code's
-        # native Skill tool can find them, then start a background watcher
-        # for real-time bidirectional sync.
-        try:
-            from agent.skill_gateway import SkillGateway
-            self._skill_gateway = SkillGateway()
-            self._skill_gateway.reconcile()
-            self._skill_gateway.start_watcher()
-        except Exception:
-            logger.debug("skill gateway reconcile failed", exc_info=True)
+        # SkillGateway (Hermes skills → ~/.claude/skills/) is intentionally
+        # NOT run. ~/.claude/ skills are managed independently by Claude Code.
 
-        # Sync Hermes memory to ~/.claude/CLAUDE.md and start a watcher
-        # for bidirectional live sync (either side can be edited).
-        try:
-            from agent.sync_translators.memory_sync import sync_hermes_to_claude, MemoryWatcher
-            sync_hermes_to_claude()
-            self._memory_watcher = MemoryWatcher()
-            self._memory_watcher.start()
-        except Exception:
-            logger.debug("memory sync failed", exc_info=True)
+        if not self._specialist_id:
+            # Master DM: sync Hermes memory (USER.md/MEMORY.md) into ~/.claude/CLAUDE.md
+            try:
+                from agent.sync_translators.memory_sync import sync_hermes_to_claude, MemoryWatcher
+                sync_hermes_to_claude()
+                self._memory_watcher = MemoryWatcher()
+                self._memory_watcher.start()
+            except Exception:
+                logger.debug("memory sync failed", exc_info=True)
+        else:
+            # Specialist sessions: strip any residual Hermes memory markers
+            # from the global ~/.claude/CLAUDE.md so they don't bleed in.
+            try:
+                from agent.sync_translators.memory_sync import _remove_section
+                _remove_section()
+            except Exception:
+                logger.debug("specialist: failed to clean global CLAUDE.md", exc_info=True)
 
         # Use Claude Code's default system prompt as the base and append
         # Hermes' platform instructions (MEDIA: tags, messaging conventions,
@@ -273,8 +293,8 @@ class ClaudeCodeSession:
             logger.debug("sdk subagent profiles unavailable", exc_info=True)
             _agents = None
 
-        # Resolve Claude Code plugins from ~/.claude/settings.json
-        _plugins = _resolve_enabled_plugins()
+        # Resolve Claude Code plugins (specialist sessions get none)
+        _plugins = _resolve_enabled_plugins(self._specialist_id)
         if _plugins:
             logger.debug("loading %d Claude Code plugin(s)", len(_plugins))
 
@@ -543,11 +563,6 @@ class ClaudeCodeSession:
 
     async def close(self):
         """Disconnect and clean up."""
-        if hasattr(self, "_skill_gateway") and self._skill_gateway:
-            try:
-                self._skill_gateway.stop_watcher()
-            except Exception:
-                pass
         if hasattr(self, "_memory_watcher") and self._memory_watcher:
             try:
                 self._memory_watcher.stop()

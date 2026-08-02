@@ -401,3 +401,59 @@ grep -r "telegram\|discord\|whatsapp\|slack" gateway/ tools/ agent/ cron/ hermes
   --include="*.py" -l | sort -u
 # Check each file in the output — if it mentions other platforms but not yours, you missed it
 ```
+
+---
+
+## Feishu App B — Per-user group-chat proxy
+
+`Platform.FEISHU_APP_B` (`"feishu_app_b"`) is a special variant of the Feishu adapter
+that proxies **group chat messages** to the user's own Hermes agent. Unlike the shared
+gateway App A which handles DMs, App B is a per-user Feishu Custom App whose bot account
+the user adds to their own groups.
+
+### Required Feishu open-platform console scopes (App B)
+
+The user's Feishu Custom App must have these permissions enabled **before** binding:
+
+| Permission | Purpose |
+|---|---|
+| `im:message:receive_v1` (or `im.message.receive_v1`) | Receive group chat messages via WebSocket long connection |
+| `im:message:create_v1` (or `im:message`) | Send messages to groups |
+| `im:chat:readonly` | Resolve chat metadata (used for group_rules auto-registration) |
+
+Without `im:message:receive_v1`, the App B WebSocket connection establishes but never
+delivers group events.
+
+### Config.yaml block written by the bind endpoint
+
+```yaml
+platforms:
+  feishu_app_b:
+    enabled: true
+    app_id: cli_xxxxxxxx
+    app_secret: xxxxxxxxxxxxxxxx
+    domain: feishu          # or "lark" for Lark Suite
+    connection_mode: websocket
+    group_only: true         # drop all DM events
+    group_sessions_per_user: false  # one session per group, not per participant
+    group_policy: open       # all group members can trigger the agent
+```
+
+### FeishuAdapterSettings flags
+
+Two flags control which chat types an adapter processes:
+
+- `group_only: bool` — when `True`, the adapter drops all `chat_type == "p2p"` (DM)
+  inbound events. Used for App B.
+- `dm_only: bool` — when `True`, the adapter drops all group inbound events. Automatically
+  set to `True` on App A (`feishu`) when `feishu_app_b` is enabled in `config.yaml`.
+
+Both flags are read from `PlatformConfig.extra` by `FeishuAdapter._load_settings` and
+are mutually independent (though setting both simultaneously makes no practical sense).
+
+### Session isolation
+
+App B uses `group_sessions_per_user=False`, meaning all participants in a group share
+one Hermes session keyed on `chat_id`. This is the correct model because the bot
+represents the user's agent, not an individual group member.
+

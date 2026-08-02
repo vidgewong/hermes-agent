@@ -409,6 +409,8 @@ class FeishuAdapterSettings:
     group_rules: Dict[str, FeishuGroupRule] = field(default_factory=dict)
     allow_bots: str = "none"  # "none" | "mentions" | "all"
     require_mention: bool = True
+    group_only: bool = False  # When True, drop all p2p (DM) inbound events
+    dm_only: bool = False  # When True, drop all group inbound events
 
 
 @dataclass
@@ -1442,8 +1444,8 @@ class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
     # Lifecycle — init / settings / connect / disconnect
     # =========================================================================
 
-    def __init__(self, config: PlatformConfig):
-        super().__init__(config, Platform.FEISHU)
+    def __init__(self, config: PlatformConfig, platform: Optional[Any] = None):
+        super().__init__(config, platform if platform is not None else Platform.FEISHU)
 
         self._settings = self._load_settings(config.extra or {})
         self._apply_settings(self._settings)
@@ -1557,10 +1559,15 @@ class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
             verification_token=str(
                 extra.get("verification_token") or os.getenv("FEISHU_VERIFICATION_TOKEN", "")
             ).strip(),
-            group_policy=os.getenv("FEISHU_GROUP_POLICY", "allowlist").strip().lower(),
+            group_policy=str(
+                extra.get("group_policy") or os.getenv("FEISHU_GROUP_POLICY", "allowlist")
+            ).strip().lower(),
             allowed_group_users=frozenset(
                 item.strip()
-                for item in os.getenv("FEISHU_ALLOWED_USERS", "").split(",")
+                for item in (
+                    str(extra.get("allowed_group_users", ""))
+                    or os.getenv("FEISHU_ALLOWED_USERS", "")
+                ).split(",")
                 if item.strip()
             ),
             bot_open_id=os.getenv("FEISHU_BOT_OPEN_ID", "").strip(),
@@ -1608,6 +1615,8 @@ class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
             require_mention=_to_boolean(
                 extra.get("require_mention", os.getenv("FEISHU_REQUIRE_MENTION", "true"))
             ),
+            group_only=_to_boolean(extra.get("group_only", False)),
+            dm_only=_to_boolean(extra.get("dm_only", False)),
         )
 
     def _apply_settings(self, settings: FeishuAdapterSettings) -> None:
@@ -2737,6 +2746,14 @@ class FeishuAdapter(FeishuStreamCardMixin, BasePlatformAdapter):
 
         if not message_id or self._is_duplicate(message_id):
             logger.debug("[Feishu] Dropping duplicate/missing message_id: %s", message_id)
+            return
+
+        is_p2p = (chat_type == "p2p")
+        if self._settings.group_only and is_p2p:
+            logger.debug("[Feishu] group_only mode: dropping p2p message %s", message_id)
+            return
+        if self._settings.dm_only and not is_p2p:
+            logger.debug("[Feishu] dm_only mode: dropping group message %s from chat %s", message_id, chat_id)
             return
 
         reason = self._admit(sender, message)

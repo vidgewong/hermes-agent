@@ -175,6 +175,7 @@ def run_claude_code_sdk_turn(
             resume=_resume_id,
             on_event=_on_event,
             on_stream_delta=_on_stream_delta,
+            specialist_id=getattr(agent, "specialist_id", None),
         )
 
     # Run the turn — bridge async SDK into the synchronous conversation_loop.

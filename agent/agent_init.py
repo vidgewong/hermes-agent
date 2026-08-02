@@ -392,6 +392,7 @@ def init_agent(
     agent.quiet_mode = quiet_mode
     agent.tool_progress_mode = tool_progress_mode
     agent.ephemeral_system_prompt = ephemeral_system_prompt
+    agent.specialist_id = None  # set by gateway from channel_overrides when applicable
     agent.platform = platform  # "cli", "telegram", "discord", "whatsapp", etc.
     agent._user_id = user_id  # Platform user identifier (gateway sessions)
     agent._user_id_alt = user_id_alt  # Optional stable alternate platform identifier

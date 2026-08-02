@@ -2397,6 +2397,66 @@ def _channel_override_lookup_keys(
     return keys
 
 
+# Mtime-based cache for disk channel_overrides.  Re-reads config.yaml only
+# when the file's mtime changes, so normal messages pay zero I/O cost.
+_disk_overrides_cache: dict = {"mtime": 0.0, "data": {}}
+
+
+def _get_channel_override_from_disk(
+    platform: "Platform",
+    lookup_keys: list[str],
+) -> "Optional[ChannelOverride]":
+    """Read channel_overrides from config.yaml on disk (mtime-cached).
+
+    For the feishu_app_b platform: if no specific override is found for the
+    channel, returns a default override with api_mode=claude_code_sdk.  All
+    App B group messages run on the Claude Code kernel by default.
+    """
+    from gateway.config import ChannelOverride as _CO
+
+    hermes_home = _hermes_home if _hermes_home else Path.home() / ".hermes"
+    config_path = hermes_home / "config.yaml"
+    if not config_path.exists():
+        # Even without a config file, App B groups default to Claude Code SDK
+        platform_key = platform.value if hasattr(platform, "value") else str(platform)
+        if platform_key == "feishu_app_b":
+            return _CO(api_mode="claude_code_sdk")
+        return None
+
+    try:
+        current_mtime = config_path.stat().st_mtime
+    except OSError:
+        return None
+
+    cache = _disk_overrides_cache
+    if current_mtime != cache["mtime"]:
+        try:
+            import yaml as _yaml
+            raw = _yaml.safe_load(config_path.read_text()) or {}
+        except Exception:
+            return None
+        cache["data"] = raw.get("platforms", {})
+        cache["mtime"] = current_mtime
+
+    platform_key = platform.value if hasattr(platform, "value") else str(platform)
+    disk_plat = cache["data"].get(platform_key, {})
+    disk_overrides = disk_plat.get("channel_overrides", {})
+
+    # Check for a specific channel override first
+    for key in lookup_keys:
+        raw_ov = disk_overrides.get(key)
+        if raw_ov and isinstance(raw_ov, dict):
+            return _CO.from_dict(raw_ov)
+
+    # For feishu_app_b: default all group messages to Claude Code SDK kernel.
+    # Specialist groups get their system_prompt from a specific override above;
+    # non-specialist groups still run Claude Code but with the global SOUL.
+    if platform_key == "feishu_app_b":
+        return _CO(api_mode="claude_code_sdk")
+
+    return None
+
+
 def _get_channel_override(
     config: GatewayConfig,
     platform: Platform,
@@ -2409,21 +2469,30 @@ def _get_channel_override(
 
     Looks up ``channel_overrides`` by ``chat_id``, then ``thread_id``, then
     ``parent_id`` (forum threads / child channels inherit the parent entry).
+
+    Falls back to reading config.yaml from disk if the in-memory config has no
+    override for this channel — supports dynamically added overrides (e.g. from
+    the specialist-group-routing plugin) without requiring a gateway restart.
     """
-    platforms = getattr(config, "platforms", None)
-    if not platforms:
-        return None
-    platform_config = platforms.get(platform)
-    if not platform_config or not platform_config.channel_overrides:
-        return None
-    overrides = platform_config.channel_overrides
-    for key in _channel_override_lookup_keys(
+    lookup_keys = _channel_override_lookup_keys(
         chat_id, thread_id=thread_id, parent_id=parent_id
-    ):
-        ov = overrides.get(key)
-        if ov is not None:
-            return ov
-    return None
+    )
+
+    # Try in-memory config first (fast path)
+    platforms = getattr(config, "platforms", None)
+    if platforms:
+        platform_config = platforms.get(platform)
+        if platform_config and platform_config.channel_overrides:
+            for key in lookup_keys:
+                ov = platform_config.channel_overrides.get(key)
+                if ov is not None:
+                    return ov
+
+    # Fallback: read from disk for dynamically added overrides.
+    # Uses a short-lived cache (mtime-based) to avoid reading config.yaml on
+    # every message for channels that have no override.
+    ov = _get_channel_override_from_disk(platform, lookup_keys)
+    return ov
 
 
 def _resolve_hermes_bin() -> Optional[list[str]]:
@@ -3797,6 +3866,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         "Channel override api_mode=%s for chat_id=%s",
                         ch.api_mode, chat_id,
                     )
+                if ch.specialist_id:
+                    runtime_kwargs["specialist_id"] = ch.specialist_id
+                elif ch.api_mode == "claude_code_sdk" and ch.system_prompt:
+                    # Backward compat: old groups without explicit specialist_id
+                    # but with a dedicated system_prompt are treated as specialist.
+                    runtime_kwargs["specialist_id"] = "specialist"
 
         if override and resolved_session_key:
             model, runtime_kwargs = self._apply_session_model_override(
@@ -8580,6 +8655,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 logger.warning("Yuanbao: websockets not installed. Run: pip install websockets")
                 return None
             return YuanbaoAdapter(config)
+
+        elif platform == Platform.FEISHU_APP_B:
+            # Per-user Feishu CLI App B — group-chat proxy.  Reuses FeishuAdapter
+            # but forced into group_only mode and uses the FEISHU_APP_B platform
+            # identity so reply routing resolves back to this adapter.
+            try:
+                from plugins.platforms.feishu.adapter import FeishuAdapter, FEISHU_AVAILABLE
+            except ImportError:
+                logger.warning(
+                    "feishu_app_b: cannot import FeishuAdapter — "
+                    "is plugins/platforms/feishu installed?"
+                )
+                return None
+            if not FEISHU_AVAILABLE:
+                logger.warning("feishu_app_b: lark_oapi not installed — run: pip install lark-oapi")
+                return None
+            if hasattr(config, "extra") and isinstance(config.extra, dict):
+                config.extra.setdefault("group_only", True)
+                config.extra.setdefault("group_sessions_per_user", False)
+                config.extra.setdefault("group_policy", "open")
+            adapter = FeishuAdapter(config, platform=platform)
+            return adapter
 
         return None
 
@@ -17894,6 +17991,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                             agent, _sig, _current_msg_count, session_id,
                         )
                         self._enforce_agent_cache_cap()
+                # Set specialist_id from channel_overrides (not passed via constructor)
+                agent.specialist_id = runtime_kwargs.get("specialist_id")
                 logger.debug("Created new agent for session %s (sig=%s)", session_key, _sig)
 
             # Per-message state — callbacks and reasoning config change every

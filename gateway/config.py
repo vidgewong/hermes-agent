@@ -192,6 +192,7 @@ class Platform(Enum):
     WEBHOOK = "webhook"
     MSGRAPH_WEBHOOK = "msgraph_webhook"
     FEISHU = "feishu"
+    FEISHU_APP_B = "feishu_app_b"  # Per-user Feishu CLI App B — group-chat proxy
     WECOM = "wecom"
     WECOM_CALLBACK = "wecom_callback"
     WEIXIN = "weixin"
@@ -372,6 +373,7 @@ class ChannelOverride:
     system_prompt: Optional[str] = None
     api_mode: Optional[str] = None
     send_via: Optional[str] = None  # e.g. "lark_cli" to route outbound via App B
+    specialist_id: Optional[str] = None  # e.g. "test-agent", "arch-agent", "req-agent"
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
@@ -385,6 +387,8 @@ class ChannelOverride:
             out["api_mode"] = self.api_mode
         if self.send_via is not None:
             out["send_via"] = self.send_via
+        if self.specialist_id is not None:
+            out["specialist_id"] = self.specialist_id
         return out
 
     @classmethod
@@ -397,6 +401,7 @@ class ChannelOverride:
             system_prompt=data.get("system_prompt"),
             api_mode=data.get("api_mode"),
             send_via=data.get("send_via"),
+            specialist_id=data.get("specialist_id"),
         )
 
 
@@ -2229,3 +2234,11 @@ def _apply_env_overrides(config: GatewayConfig) -> None:
 
     for platform_config in config.platforms.values():
         platform_config.extra.pop("_enabled_explicit", None)
+
+    # When feishu_app_b is enabled, App A (feishu) should restrict itself to DM
+    # only to avoid duplicate processing of group messages.
+    feishu_app_b_cfg = config.platforms.get(Platform.FEISHU_APP_B)
+    if feishu_app_b_cfg is not None and feishu_app_b_cfg.enabled:
+        feishu_cfg = config.platforms.get(Platform.FEISHU)
+        if feishu_cfg is not None:
+            feishu_cfg.extra.setdefault("dm_only", True)
