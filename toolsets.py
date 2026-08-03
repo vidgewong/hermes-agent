@@ -315,6 +315,12 @@ TOOLSETS = {
         "includes": []
     },
 
+    "feishu": {
+        "description": "Feishu specialist group creation (App B CLI identity)",
+        "tools": ["create_specialist_group"],
+        "includes": []
+    },
+
     "spotify": {
         "description": "Native Spotify playback, search, playlist, album, and library tools",
         "tools": [

@@ -110,12 +110,9 @@ def _get_user_access_token() -> tuple[str, str, str]:
             except OSError:
                 pass
             return new_token, app_id, ""
-        return "", "", err
 
-    return "", "", (
-        "App B authorization expired. "
-        "Please re-authorize on the Channels page."
-    )
+    # No valid user token — fallback to tenant_access_token (bot-owned groups)
+    return _get_bot_token_from_config()
 
 
 def _get_bot_token_from_config() -> tuple[str, str, str]:

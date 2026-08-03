@@ -1306,6 +1306,10 @@ def _run_official_feishu_ws_client(ws_client: Any, adapter: Any) -> None:
     ws_client_module.loop = loop
     adapter._ws_thread_loop = loop
 
+    # lark SDK (websockets 15+) forces proxy=None, bypassing env vars.
+    # Clear _ws_connect_kwargs so websockets reads HTTPS_PROXY from env.
+    ws_client_module._ws_connect_kwargs = lambda: {}
+
     original_connect = ws_client_module.websockets.connect
     original_configure = getattr(ws_client, "_configure", None)
 
