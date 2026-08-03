@@ -31,55 +31,73 @@ def _resolve_claude_home() -> Path:
 def _resolve_enabled_plugins(specialist_id: str | None = None) -> list[dict[str, str]]:
     """Resolve installed plugin paths for the SDK plugins option.
 
-    Loads all installed plugins from installed_plugins.json (no settings.json
-    enabledPlugins gate — in container/agent contexts all installed plugins
-    are considered enabled). Remaps installPath from the original host path
-    to the actual .claude directory in the current environment.
+    Loads plugins from two sources:
+    1. installed_plugins.json — manually installed via `claude plugin install`
+    2. known_marketplaces.json — marketplace-distributed plugins (e.g. Plugin Hub)
 
-    When specialist_id is set, returns an empty list — specialist sessions
-    operate without plugins to avoid polluting their isolated context.
+    In container/agent contexts all discovered plugins are considered enabled
+    (no settings.json enabledPlugins gate). Remaps paths from the original
+    host to the actual .claude directory in the current environment.
 
     Returns a list of SdkPluginConfig dicts: [{"type": "local", "path": "..."}]
     """
-    if specialist_id:
-        return []
-
     claude_home = _resolve_claude_home()
-    installed_path = claude_home / "plugins" / "installed_plugins.json"
-
-    if not installed_path.exists():
-        return []
-
-    try:
-        installed = json.loads(installed_path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return []
-
-    installed_plugins = installed.get("plugins", {})
     plugins_dir = claude_home / "plugins"
-
     result = []
-    for _plugin_key, installs in installed_plugins.items():
-        if not installs:
-            continue
-        install_info = installs[0] if isinstance(installs, list) else installs
-        install_path = install_info.get("installPath", "")
-        if not install_path:
-            continue
 
-        # Remap: the recorded path may reference the original host's home.
-        # Extract the relative portion after ".claude/plugins/" and resolve
-        # it against the actual plugins directory in this environment.
-        marker = ".claude/plugins/"
-        idx = install_path.find(marker)
-        if idx != -1:
-            relative = install_path[idx + len(marker):]
-            resolved = plugins_dir / relative
-        else:
-            resolved = Path(install_path)
+    # Source 1: installed_plugins.json (manual installs)
+    installed_path = plugins_dir / "installed_plugins.json"
+    if installed_path.exists():
+        try:
+            installed = json.loads(installed_path.read_text())
+            for _plugin_key, installs in installed.get("plugins", {}).items():
+                if not installs:
+                    continue
+                install_info = installs[0] if isinstance(installs, list) else installs
+                install_path = install_info.get("installPath", "")
+                if not install_path:
+                    continue
 
-        if resolved.is_dir():
-            result.append({"type": "local", "path": str(resolved)})
+                marker = ".claude/plugins/"
+                idx = install_path.find(marker)
+                if idx != -1:
+                    relative = install_path[idx + len(marker):]
+                    resolved = plugins_dir / relative
+                else:
+                    resolved = Path(install_path)
+
+                if resolved.is_dir():
+                    result.append({"type": "local", "path": str(resolved)})
+        except (json.JSONDecodeError, OSError):
+            pass
+
+    # Source 2: known_marketplaces.json (marketplace-distributed plugins)
+    marketplaces_json = plugins_dir / "known_marketplaces.json"
+    if marketplaces_json.exists():
+        try:
+            marketplaces = json.loads(marketplaces_json.read_text())
+            for _mp_name, mp_info in marketplaces.items():
+                install_location = mp_info.get("installLocation", "")
+                if not install_location:
+                    continue
+
+                marker = ".claude/plugins/"
+                idx = install_location.find(marker)
+                if idx != -1:
+                    relative = install_location[idx + len(marker):]
+                    mp_dir = plugins_dir / relative / "plugins"
+                else:
+                    mp_dir = Path(install_location) / "plugins"
+
+                if not mp_dir.is_dir():
+                    continue
+
+                for plugin_name in sorted(os.listdir(mp_dir)):
+                    plugin_path = mp_dir / plugin_name
+                    if plugin_path.is_dir() and not plugin_name.startswith("."):
+                        result.append({"type": "local", "path": str(plugin_path)})
+        except (json.JSONDecodeError, OSError):
+            pass
 
     return result
 
