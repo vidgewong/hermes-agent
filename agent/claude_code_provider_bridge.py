@@ -128,7 +128,10 @@ def resolve_provider_for_sdk(agent) -> ClaudeCodeProviderConfig:
             env["ANTHROPIC_API_KEY"] = api_key
         if base_url:
             env["ANTHROPIC_BASE_URL"] = base_url
-        sdk_model = _strip_provider_prefix(model) if model else None
+        # For custom/LiteLLM providers, preserve the model string as-is.
+        # LiteLLM routing prefixes (cc/, openai/, etc.) are NOT hermes provider
+        # namespaces — stripping them causes "model not found" on the proxy.
+        sdk_model = model or None
         if sdk_model:
             env["ANTHROPIC_MODEL"] = sdk_model
         # Propagate ssl_verify: false → NODE_TLS_REJECT_UNAUTHORIZED=0 for the
