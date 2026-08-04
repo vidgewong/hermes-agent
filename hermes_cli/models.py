@@ -3516,6 +3516,7 @@ def probe_api_models(
     timeout: float = 5.0,
     api_mode: Optional[str] = None,
     request_headers: Optional[dict[str, str]] = None,
+    ssl_verify: bool = True,
 ) -> dict[str, Any]:
     """Probe a ``/models`` endpoint with light URL heuristics.
 
@@ -3569,12 +3570,19 @@ def probe_api_models(
 
         headers.update(normalize_extra_headers(request_headers))
 
+    ssl_context = None
+    if not ssl_verify:
+        import ssl as _ssl
+        ssl_context = _ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = _ssl.CERT_NONE
+
     for candidate_base, is_fallback in candidates:
         url = candidate_base.rstrip("/") + "/models"
         tried.append(url)
         req = urllib.request.Request(url, headers=headers)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=ssl_context) as resp:
                 data = json.loads(resp.read().decode())
                 return {
                     "models": [m.get("id", "") for m in data.get("data", [])],
@@ -3601,6 +3609,7 @@ def fetch_api_models(
     timeout: float = 5.0,
     api_mode: Optional[str] = None,
     headers: Optional[dict[str, str]] = None,
+    ssl_verify: bool = True,
 ) -> Optional[list[str]]:
     """Fetch the list of available model IDs from the provider's ``/models`` endpoint.
 
@@ -3612,6 +3621,7 @@ def fetch_api_models(
         base_url,
         timeout=timeout,
         api_mode=api_mode,
+        ssl_verify=ssl_verify,
         request_headers=headers,
     ).get("models")
 

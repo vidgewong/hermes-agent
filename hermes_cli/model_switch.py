@@ -2051,10 +2051,14 @@ def list_authenticated_providers(
             if should_probe:
                 try:
                     from hermes_cli.models import fetch_api_models
+                    _ssl_verify = ep_cfg.get("ssl_verify", True)
+                    if isinstance(_ssl_verify, str):
+                        _ssl_verify = _ssl_verify.lower() not in {"false", "no", "0"}
                     live_models = fetch_api_models(
                         api_key,
                         api_url,
                         headers=_extra_headers_from_config(ep_cfg) or None,
+                        ssl_verify=bool(_ssl_verify),
                     )
                     if live_models:
                         models_list = live_models
@@ -2107,8 +2111,23 @@ def list_authenticated_providers(
         if refresh or probe_current_custom_provider:
             try:
                 from hermes_cli.models import fetch_api_models
-
-                _live_models = fetch_api_models("", str(current_base_url).strip().rstrip("/"))
+                _bare_ssl = True
+                try:
+                    from hermes_cli.config import get_custom_provider_tls_settings, load_config as _lc_bare
+                    _bare_cfg = _lc_bare()
+                    _bare_tls = get_custom_provider_tls_settings(
+                        str(current_base_url).strip().rstrip("/"),
+                        _bare_cfg.get("custom_providers"),
+                        _bare_cfg,
+                    )
+                    if _bare_tls.get("ssl_verify") is False:
+                        _bare_ssl = False
+                except Exception:
+                    pass
+                _live_models = fetch_api_models(
+                    "", str(current_base_url).strip().rstrip("/"),
+                    ssl_verify=_bare_ssl,
+                )
                 if _live_models:
                     _models = _live_models
             except Exception:
@@ -2202,6 +2221,9 @@ def list_authenticated_providers(
                 if not display_name:
                     display_name = raw_name
                 slug = custom_provider_slug(display_name)
+                _entry_ssl = entry.get("ssl_verify", True)
+                if isinstance(_entry_ssl, str):
+                    _entry_ssl = _entry_ssl.lower() not in {"false", "no", "0"}
                 groups[group_key] = {
                     "slug": slug,
                     "name": display_name,
@@ -2209,6 +2231,7 @@ def list_authenticated_providers(
                     "api_key": api_key,
                     "models": [],
                     "discover_models": discover,
+                    "ssl_verify": bool(_entry_ssl),
                     "extra_headers": entry_extra_headers,
                 }
             else:
@@ -2326,6 +2349,7 @@ def list_authenticated_providers(
                         api_key,
                         api_url,
                         headers=grp.get("extra_headers") or None,
+                        ssl_verify=grp.get("ssl_verify", True),
                     )
                     if live_models:
                         grp["models"] = live_models
