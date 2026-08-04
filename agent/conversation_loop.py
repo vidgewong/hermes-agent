@@ -324,10 +324,13 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             )
 
     if stored_prompt and _stored_prompt_matches_runtime(agent, stored_prompt):
-        # Continuing session — reuse the exact system prompt from the
-        # previous turn so the Anthropic cache prefix matches.
-        agent._cached_system_prompt = stored_prompt
-        return
+        # If a soul_override is set, always rebuild so the specialist identity
+        # is applied even when continuing an existing session.
+        if not getattr(agent, "soul_override", None):
+            # Continuing session — reuse the exact system prompt from the
+            # previous turn so the Anthropic cache prefix matches.
+            agent._cached_system_prompt = stored_prompt
+            return
     if stored_prompt:
         stored_state = "stale_runtime"
         logger.info(

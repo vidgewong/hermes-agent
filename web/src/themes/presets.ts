@@ -258,14 +258,44 @@ export const mercedesBenzTheme: DashboardTheme = {
   swatchColors: ["#041c1c", "#ffe6cb", "#ffbd38"],
 };
 
+export const mercedesBenzLightTheme: DashboardTheme = {
+  name: "mercedes-benz-light",
+  label: "Mercedes-Benz Light",
+  description: "Warm parchment canvas — premium light mode with Mercedes precision",
+  palette: {
+    background: { hex: "#f5f2ed", alpha: 1 },
+    midground: { hex: "#1a2732", alpha: 1 },
+    foreground: { hex: "#170d02", alpha: 0 },
+    warmGlow: "rgba(26, 39, 50, 0.06)",
+    noiseOpacity: 0,
+  },
+  typography: {
+    ...DEFAULT_TYPOGRAPHY,
+    fontSans: `"Inter", ${SYSTEM_SANS}`,
+    fontMono: `"JetBrains Mono", ${SYSTEM_MONO}`,
+    fontUrl:
+      "https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap",
+    letterSpacing: "0.005em",
+  },
+  layout: {
+    ...DEFAULT_LAYOUT,
+    radius: "0.375rem",
+    density: "comfortable",
+  },
+  colorOverrides: {
+    card: "#ffffff",
+    border: "#ddd9d2",
+    muted: "#ede9e3",
+    mutedForeground: "#7a746e",
+    secondary: "#ede9e3",
+    secondaryForeground: "#1a2732",
+  },
+  terminalBackground: "#1a2732",
+  terminalForeground: "#e8e4de",
+  swatchColors: ["#f5f2ed", "#1a2732", "#ede9e3"],
+};
+
 export const BUILTIN_THEMES: Record<string, DashboardTheme> = {
-  default: defaultTheme,
-  "default-large": defaultLargeTheme,
-  "nous-blue": nousBlueTheme,
-  midnight: midnightTheme,
-  ember: emberTheme,
-  mono: monoTheme,
-  cyberpunk: cyberpunkTheme,
-  rose: roseTheme,
   "mercedes-benz": mercedesBenzTheme,
+  "mercedes-benz-light": mercedesBenzLightTheme,
 };

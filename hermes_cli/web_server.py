@@ -8365,6 +8365,8 @@ _OPENSTAR_AGENTS = [
         "icon": "FileText",
         "model": "claude-sonnet-4-6",
         "available_models": _AVAILABLE_MODELS,
+        "kernel": "claude_code_sdk",
+        "soul_id": "req-agent",
         "knowledge": {
             "skills": [
                 {
@@ -8421,6 +8423,8 @@ _OPENSTAR_AGENTS = [
         "icon": "FlaskConical",
         "model": "claude-sonnet-4-6",
         "available_models": _AVAILABLE_MODELS,
+        "kernel": "claude_code_sdk",
+        "soul_id": "test-agent",
         "knowledge": {
             "skills": [
                 {
@@ -8460,6 +8464,8 @@ _OPENSTAR_AGENTS = [
         "icon": "Building2",
         "model": "claude-sonnet-4-6",
         "available_models": _AVAILABLE_MODELS,
+        "kernel": "claude_code_sdk",
+        "soul_id": "arch-agent",
         "knowledge": {
             "skills": [
                 {
@@ -8521,13 +8527,25 @@ async def get_openstar_agents():
                 db.close()
         except Exception:
             pass
-        agents.append({
-            **agent_def,
+        soul_content = None
+        soul_id = agent_def.get("soul_id")
+        if soul_id:
+            soul_path = get_hermes_home() / "souls" / f"{soul_id}.md"
+            if soul_path.exists():
+                try:
+                    soul_content = soul_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+        entry = {k: v for k, v in agent_def.items() if k != "soul_id"}
+        entry.update({
             "status": status,
             "last_active": last_active,
             "current_task": None,
             "recent_actions": [],
         })
+        if soul_content is not None:
+            entry["soul"] = soul_content
+        agents.append(entry)
     return {"agents": agents}
 
 
@@ -15415,8 +15433,67 @@ _CHAT_STREAM_AGENTS: Dict[str, Any] = {}
 _CHAT_STREAM_LOCK = threading.Lock()
 
 
-def _get_or_create_chat_agent(session_id: Optional[str], profile: Optional[str]):
-    """Get or create an AIAgent for the IM chat view."""
+_DASHBOARD_IM_ORIGIN_KEY = "dashboard_im_agent"
+
+
+def _load_session_agent_binding(session_db, session_id: Optional[str]) -> dict:
+    """Read soul_override + api_mode bound to this session from origin_json."""
+    if not session_id or not session_db:
+        return {}
+    try:
+        row = session_db.get_session(session_id)
+        if not row:
+            return {}
+        origin_raw = row.get("origin_json")
+        if not origin_raw:
+            return {}
+        origin = json.loads(origin_raw)
+        binding = origin.get(_DASHBOARD_IM_ORIGIN_KEY) or {}
+        return binding
+    except Exception:
+        return {}
+
+
+def _save_session_agent_binding(session_db, session_id: str, soul_override: Optional[str], api_mode: Optional[str], agent_id: Optional[str] = None) -> None:
+    """Persist soul_override + api_mode + agent_id into origin_json for this session."""
+    if not session_id or not session_db:
+        return
+    try:
+        row = session_db.get_session(session_id)
+        existing = {}
+        if row and row.get("origin_json"):
+            try:
+                existing = json.loads(row["origin_json"])
+            except Exception:
+                pass
+        existing[_DASHBOARD_IM_ORIGIN_KEY] = {
+            "soul_override": soul_override,
+            "api_mode": api_mode,
+            "agent_id": agent_id,
+        }
+        def _do(conn):
+            conn.execute(
+                "UPDATE sessions SET origin_json = ? WHERE id = ?",
+                (json.dumps(existing), session_id),
+            )
+        session_db._execute_write(_do)
+    except Exception as exc:
+        _log.warning("Failed to save agent binding for session %s: %s", session_id, exc)
+
+
+def _get_or_create_chat_agent(
+    session_id: Optional[str],
+    profile: Optional[str],
+    soul_override: Optional[str] = None,
+    force_api_mode: Optional[str] = None,
+):
+    """Get or create an AIAgent for the IM chat view.
+
+    soul_override and force_api_mode are only passed on new sessions (first message).
+    For existing sessions they are read from the session DB binding written at
+    session creation time, so the agent identity is always consistent regardless
+    of what the frontend sends.
+    """
     from hermes_cli.config import load_config
     from hermes_cli.runtime_provider import resolve_runtime_provider
     from hermes_cli.tools_config import _get_platform_tools
@@ -15448,13 +15525,25 @@ def _get_or_create_chat_agent(session_id: Optional[str], profile: Optional[str])
     else:
         session_db = SessionDB()
 
+    # For existing sessions, always read agent binding from DB (ignore frontend params).
+    # For new sessions, use the caller-supplied values (and they will be persisted below).
+    effective_soul = soul_override
+    effective_api_mode = force_api_mode
+    if session_id:
+        binding = _load_session_agent_binding(session_db, session_id)
+        if binding:
+            effective_soul = binding.get("soul_override") or soul_override
+            effective_api_mode = binding.get("api_mode") or force_api_mode
+
+    resolved_api_mode = effective_api_mode or runtime.get("api_mode")
+
     _fb = get_fallback_chain(cfg)
 
     agent = AIAgent(
         api_key=runtime.get("api_key"),
         base_url=runtime.get("base_url"),
         provider=runtime.get("provider"),
-        api_mode=runtime.get("api_mode"),
+        api_mode=resolved_api_mode,
         model=effective_model,
         enabled_toolsets=toolsets_list,
         quiet_mode=True,
@@ -15465,6 +15554,8 @@ def _get_or_create_chat_agent(session_id: Optional[str], profile: Optional[str])
         fallback_model=_fb or None,
     )
     agent.suppress_status_output = True
+    if effective_soul:
+        agent.soul_override = effective_soul
     return agent
 
 
@@ -15507,8 +15598,16 @@ async def chat_stream_ws(ws: WebSocket) -> None:
                     await ws.send_json({"type": "error", "error": "Empty message"})
                     continue
 
+                soul_override = data.get("soul_override") or None
+                force_api_mode = data.get("api_mode") or None
+                agent_id = data.get("agent_id") or None
                 # Run agent in a thread to not block the event loop
-                await _handle_chat_message(ws, user_message, session_id, profile)
+                await _handle_chat_message(
+                    ws, user_message, session_id, profile,
+                    soul_override=soul_override,
+                    force_api_mode=force_api_mode,
+                    agent_id=agent_id,
+                )
 
             elif msg_type == "ping":
                 await ws.send_json({"type": "pong"})
@@ -15524,6 +15623,10 @@ async def _handle_chat_message(
     user_message: str,
     session_id: Optional[str],
     profile: Optional[str],
+    system_prompt: Optional[str] = None,
+    soul_override: Optional[str] = None,
+    force_api_mode: Optional[str] = None,
+    agent_id: Optional[str] = None,
 ) -> None:
     """Run a single agent turn and stream structured events back."""
     import uuid as _uuid
@@ -15594,7 +15697,11 @@ async def _handle_chat_message(
 
     def _run_agent():
         try:
-            agent = _get_or_create_chat_agent(session_id, profile)
+            agent = _get_or_create_chat_agent(
+                session_id, profile,
+                soul_override=soul_override,
+                force_api_mode=force_api_mode,
+            )
             agent.stream_delta_callback = _stream_callback
             agent.tool_start_callback = _tool_start_callback
             agent.tool_complete_callback = _tool_complete_callback
@@ -15602,6 +15709,19 @@ async def _handle_chat_message(
             result = agent.run_conversation(user_message)
             final = result.get("final_response", "")
             new_session_id = getattr(agent, "session_id", session_id)
+
+            # Persist agent binding (soul + api_mode) to session DB after the
+            # first turn so future turns always use the correct identity and runtime,
+            # regardless of what the frontend sends.
+            if (soul_override or force_api_mode or agent_id) and new_session_id:
+                _save_session_agent_binding(
+                    agent._session_db if hasattr(agent, "_session_db") else None,
+                    new_session_id,
+                    soul_override,
+                    force_api_mode,
+                    agent_id=agent_id,
+                )
+
             loop.call_soon_threadsafe(
                 events_queue.put_nowait,
                 {
