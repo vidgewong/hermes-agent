@@ -136,9 +136,9 @@ COMMAND_REGISTRY: list[CommandDef] = [
     CommandDef("codex-runtime", "Toggle codex app-server runtime for OpenAI/Codex models",
                "Configuration", aliases=("codex_runtime",),
                args_hint="[auto|codex_app_server]"),
-    CommandDef("claude-code-runtime", "Toggle Claude Code SDK runtime for Anthropic models",
+    CommandDef("claude-code-runtime", "Runtime is managed per-agent (read-only)",
                "Configuration", aliases=("cc-runtime", "claude_code_runtime"),
-               args_hint="[on|off|auto]"),
+               args_hint=""),
 
     CommandDef("personality", "Set a predefined personality", "Configuration",
                args_hint="[name]"),

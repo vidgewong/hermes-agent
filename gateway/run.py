@@ -9697,7 +9697,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await self._handle_codex_runtime_command(event)
 
         if canonical in ("claude-code-runtime", "cc-runtime"):
-            return await self._handle_claude_code_runtime_command(event)
+            return "Runtime is managed per-agent and cannot be switched manually."
 
         if canonical == "personality":
             return await self._handle_personality_command(event)

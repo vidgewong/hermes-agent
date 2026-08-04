@@ -8684,7 +8684,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         elif canonical == "codex-runtime":
             self._handle_codex_runtime(cmd_original)
         elif canonical in ("claude-code-runtime", "cc-runtime"):
-            self._handle_claude_code_runtime(cmd_original)
+            _cprint("  Runtime is managed per-agent and cannot be switched manually.")
 
         elif canonical == "personality":
             # Use original case (handler lowercases the personality name itself)
