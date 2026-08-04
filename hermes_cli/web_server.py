@@ -8121,6 +8121,25 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
             raise HTTPException(status_code=404, detail="Session not found")
         if profile:
             session["profile"] = _cron_profile_home(profile)[0]
+        # Augment with resolved agent binding so the frontend can show the
+        # correct agent badge without waiting for a gateway turn to write it.
+        try:
+            binding = _load_session_agent_binding(db, sid)
+            if binding.get("agent_id") or binding.get("specialist_id"):
+                existing_origin = {}
+                if session.get("origin_json"):
+                    try:
+                        existing_origin = json.loads(session["origin_json"])
+                    except Exception:
+                        pass
+                if not (existing_origin.get(_DASHBOARD_IM_ORIGIN_KEY) or {}).get("agent_id"):
+                    existing_origin[_DASHBOARD_IM_ORIGIN_KEY] = {
+                        **(existing_origin.get(_DASHBOARD_IM_ORIGIN_KEY) or {}),
+                        **{k: v for k, v in binding.items() if k in ("agent_id", "specialist_id", "api_mode") and v},
+                    }
+                    session["origin_json"] = json.dumps(existing_origin)
+        except Exception:
+            pass
         return session
     finally:
         db.close()
@@ -15435,20 +15454,88 @@ _CHAT_STREAM_LOCK = threading.Lock()
 
 _DASHBOARD_IM_ORIGIN_KEY = "dashboard_im_agent"
 
+# Maps gateway specialist_id → OpenStar agent id (used by the web dashboard UI)
+_SPECIALIST_TO_AGENT_ID: dict = {
+    "req-agent": "mb-req",
+    "test-agent": "mb-test",
+    "arch-agent": "mb-arch",
+}
+
 
 def _load_session_agent_binding(session_db, session_id: Optional[str]) -> dict:
-    """Read soul_override + api_mode bound to this session from origin_json."""
+    """Read soul_override + api_mode bound to this session from origin_json.
+
+    For gateway (Feishu) specialist sessions the binding may contain a
+    ``specialist_id`` instead of a pre-loaded ``soul_override``, or nothing
+    at all (pre-fix sessions).  This function resolves everything so callers
+    always see a consistent ``soul_override`` / ``api_mode`` / ``specialist_id``
+    / ``agent_id`` dict.
+    """
     if not session_id or not session_db:
         return {}
     try:
         row = session_db.get_session(session_id)
         if not row:
             return {}
+
+        binding: dict = {}
+
+        # Primary source: dashboard_im_agent key in origin_json.
         origin_raw = row.get("origin_json")
-        if not origin_raw:
-            return {}
-        origin = json.loads(origin_raw)
-        binding = origin.get(_DASHBOARD_IM_ORIGIN_KEY) or {}
+        if origin_raw:
+            try:
+                origin = json.loads(origin_raw)
+                binding = dict(origin.get(_DASHBOARD_IM_ORIGIN_KEY) or {})
+            except Exception:
+                pass
+
+        # Secondary fallback for pre-fix gateway sessions: look up the channel
+        # override from config.yaml using the session's stored chat_id.
+        if not binding.get("specialist_id"):
+            chat_id = row.get("chat_id")
+            source_platform = row.get("source")
+            if chat_id and source_platform:
+                try:
+                    from gateway.config import Platform as _Platform
+                    from gateway.run import _get_channel_override_from_disk, _channel_override_lookup_keys
+                    _plat = _Platform(source_platform)
+                    _keys = _channel_override_lookup_keys(chat_id)
+                    ch = _get_channel_override_from_disk(_plat, _keys)
+                    if ch and ch.specialist_id:
+                        binding["specialist_id"] = ch.specialist_id
+                        if not binding.get("api_mode") and ch.api_mode:
+                            binding["api_mode"] = ch.api_mode
+                except Exception:
+                    pass
+
+        # Resolve specialist_id → soul_override + agent_id.
+        specialist_id = binding.get("specialist_id")
+        if specialist_id:
+            if not binding.get("soul_override"):
+                try:
+                    from hermes_constants import get_hermes_home
+                    soul_path = get_hermes_home() / "souls" / f"{specialist_id}.md"
+                    if soul_path.exists():
+                        binding["soul_override"] = soul_path.read_text(encoding="utf-8")
+                except Exception:
+                    pass
+            if not binding.get("agent_id"):
+                agent_id = _SPECIALIST_TO_AGENT_ID.get(specialist_id)
+                if agent_id:
+                    binding["agent_id"] = agent_id
+
+        # Last-resort fallback: infer api_mode from model_config.gateway_runtime.
+        if not binding.get("api_mode"):
+            try:
+                raw_cfg = row.get("model_config")
+                if raw_cfg:
+                    mcfg = json.loads(raw_cfg)
+                    gw_api_mode = (mcfg.get("gateway_runtime") or {}).get("api_mode")
+                    if gw_api_mode:
+                        binding["api_mode"] = gw_api_mode
+            except Exception:
+                pass
+
         return binding
     except Exception:
         return {}
@@ -15529,11 +15616,13 @@ def _get_or_create_chat_agent(
     # For new sessions, use the caller-supplied values (and they will be persisted below).
     effective_soul = soul_override
     effective_api_mode = force_api_mode
+    effective_specialist_id = None
     if session_id:
         binding = _load_session_agent_binding(session_db, session_id)
         if binding:
             effective_soul = binding.get("soul_override") or soul_override
             effective_api_mode = binding.get("api_mode") or force_api_mode
+            effective_specialist_id = binding.get("specialist_id") or None
 
     resolved_api_mode = effective_api_mode or runtime.get("api_mode")
 
@@ -15556,6 +15645,8 @@ def _get_or_create_chat_agent(
     agent.suppress_status_output = True
     if effective_soul:
         agent.soul_override = effective_soul
+    if effective_specialist_id:
+        agent.specialist_id = effective_specialist_id
     return agent
 
 

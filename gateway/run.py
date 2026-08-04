@@ -3975,6 +3975,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         lists, desktop/dashboard details, and follow-up session tooling report the
         backend that actually answered the latest turn.
 
+        Also writes a ``dashboard_im_agent`` binding into ``origin_json`` when the
+        agent has a ``specialist_id``, so the web dashboard opens the session with
+        the correct agent identity instead of falling back to the master agent.
+
         Called from the ``run_sync`` closure, which executes off the event loop
         in the executor thread — so the synchronous ``SessionDB`` (``_db``) is
         used directly rather than awaiting the AsyncSessionDB forwarder.
@@ -4014,6 +4018,47 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             db.update_session_meta(session_id, json.dumps(config), model=model)
         except Exception:
             logger.debug("Failed to sync gateway session model metadata", exc_info=True)
+
+        # Write dashboard_im_agent binding so the web dashboard opens specialist
+        # sessions with the correct agent/runtime instead of the master default.
+        specialist_id = getattr(agent, "specialist_id", None)
+        api_mode = getattr(agent, "api_mode", None)
+        if not specialist_id:
+            return
+        # Map specialist_id → OpenStar agent_id for the frontend agent selector.
+        _specialist_to_agent_id = {
+            "req-agent": "mb-req",
+            "test-agent": "mb-test",
+            "arch-agent": "mb-arch",
+        }
+        try:
+            db = self._session_db._db
+            row = db.get_session(session_id)
+            if not row:
+                return
+            try:
+                origin = json.loads(row.get("origin_json") or "{}")
+            except Exception:
+                origin = {}
+            if not isinstance(origin, dict):
+                origin = {}
+            existing_binding = origin.get("dashboard_im_agent") or {}
+            # Only write once — don't overwrite if already set for this session.
+            if existing_binding.get("specialist_id") == specialist_id:
+                return
+            origin["dashboard_im_agent"] = {
+                "specialist_id": specialist_id,
+                "agent_id": _specialist_to_agent_id.get(specialist_id, specialist_id),
+                "api_mode": api_mode or "claude_code_sdk",
+            }
+            def _do(conn):
+                conn.execute(
+                    "UPDATE sessions SET origin_json = ? WHERE id = ?",
+                    (json.dumps(origin), session_id),
+                )
+            db._execute_write(_do)
+        except Exception:
+            logger.debug("Failed to write dashboard_im_agent binding for session %s", session_id, exc_info=True)
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
         """React to an adapter failure after startup.

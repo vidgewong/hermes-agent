@@ -398,8 +398,18 @@ def _persist_sdk_session_id(agent, sdk_session_id: str) -> None:
 
 
 def _load_sdk_session_id(agent) -> str | None:
-    """Return the previously persisted claude CLI session ID, if any."""
+    """Return the previously persisted claude CLI session ID, if any.
+
+    Returns None for dashboard-im agents: the gateway and dashboard run in
+    different contexts and share a Hermes session ID, but the claude CLI session
+    (cwd, process state) only makes sense to resume from the same context that
+    created it.  Resuming a gateway session from the dashboard (or vice versa)
+    causes a ProcessError exit code 1 because the cwd / session state mismatches.
+    """
     import json as _json
+    # Never resume a gateway-originated claude CLI session from the dashboard.
+    if getattr(agent, "platform", None) == "dashboard-im":
+        return None
     try:
         db = getattr(agent, "_session_db", None)
         hermes_session_id = getattr(agent, "session_id", None)
