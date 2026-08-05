@@ -401,7 +401,8 @@ def _maybe_apply_claude_code_sdk_runtime(
 
     Default behavior is preserved: when the key is unset, "auto", or empty,
     this function is a no-op. Only providers that Claude Code SDK supports
-    (anthropic, bedrock, vertex, claude-code) are eligible.
+    (anthropic, bedrock, vertex, claude-code) are eligible. For custom/LiteLLM
+    providers, only applies when the model name indicates a Claude model.
 
     Returns the (possibly-rewritten) api_mode."""
     if not model_cfg:
@@ -411,6 +412,10 @@ def _maybe_apply_claude_code_sdk_runtime(
         return api_mode
     runtime = str(model_cfg.get("claude_code_runtime") or "").strip().lower()
     if runtime == "claude_code_sdk":
+        if provider in ("custom", ""):
+            _model_name = str(model_cfg.get("default") or "").strip().lower()
+            if "claude" not in _model_name:
+                return api_mode
         return "claude_code_sdk"
     return api_mode
 
@@ -1583,10 +1588,12 @@ def resolve_runtime_provider(
     # token, guardrails, etc.) that the generic custom-provider path would lose.
     _model_cfg_for_sdk = _get_model_config()
     _sdk_requested_provider = requested_provider or str(_model_cfg_for_sdk.get("provider") or "").strip()
+    _sdk_default_model = str(_model_cfg_for_sdk.get("default") or "").strip().lower()
     if (
         requested is None
         and _sdk_requested_provider not in ("bedrock", "vertex", "aws", "aws-bedrock", "amazon-bedrock", "amazon")
         and str(_model_cfg_for_sdk.get("claude_code_runtime") or "").strip().lower() == "claude_code_sdk"
+        and ("claude" in _sdk_default_model or _sdk_requested_provider in ("anthropic", "claude-code"))
     ):
         # config.yaml may have bare `provider: custom` with no base_url, which
         # falls through to OpenRouter. Recover the real custom_providers identity:
