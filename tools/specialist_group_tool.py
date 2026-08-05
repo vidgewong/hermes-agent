@@ -1,14 +1,13 @@
 """create_specialist_group — Hermes native tool.
 
-Creates a Feishu group using App B (user_access_token from .lark-cli-user-token.json),
+Creates a Feishu group using App B (tenant_access_token from config.yaml),
 adds the bot, invites the user, writes channel_overrides with specialist_id,
-and sends an initial message. Always uses App B CLI identity.
+and sends an initial message.
 """
 
 import json
 import logging
 import os
-import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -68,55 +67,9 @@ def _feishu_post(token: str, path: str, body: dict) -> dict:
         return json.loads(resp.read())
 
 
-def _get_user_access_token() -> tuple[str, str, str]:
-    """Resolve App B access token. Returns (token, app_id, error).
-
-    Tries user_access_token first (user-owned groups), falls back to
-    tenant_access_token from app credentials (bot-owned groups).
-    """
-    token_path = _get_hermes_home() / ".lark-cli-user-token.json"
-    if not token_path.exists():
-        # Fallback: get tenant_access_token from config.yaml App B credentials
-        return _get_bot_token_from_config()
-
-    try:
-        data = json.loads(token_path.read_text())
-    except (json.JSONDecodeError, OSError) as exc:
-        return "", "", f"Failed to read App B token file: {exc}"
-
-    app_id = data.get("app_id", "")
-    app_secret = data.get("app_secret", "")
-    if not app_id or not app_secret:
-        return "", "", (
-            "App B credentials incomplete. "
-            "Please re-register on the Channels page."
-        )
-
-    access_token = data.get("access_token", "")
-    expires_at = data.get("expires_at", 0)
-
-    if access_token and expires_at > time.time() + 60:
-        return access_token, app_id, ""
-
-    refresh_token = data.get("refresh_token", "")
-    if refresh_token:
-        new_token, new_refresh, err = _refresh_user_token(app_id, app_secret, refresh_token)
-        if new_token:
-            data["access_token"] = new_token
-            data["refresh_token"] = new_refresh or refresh_token
-            data["expires_at"] = int(time.time()) + 6900
-            try:
-                token_path.write_text(json.dumps(data, indent=2))
-            except OSError:
-                pass
-            return new_token, app_id, ""
-
-    # No valid user token — fallback to tenant_access_token (bot-owned groups)
-    return _get_bot_token_from_config()
-
 
 def _get_bot_token_from_config() -> tuple[str, str, str]:
-    """Fallback: get tenant_access_token using App B app_id/app_secret from config.yaml."""
+    """Get tenant_access_token using App B app_id/app_secret from config.yaml."""
     config_path = _get_hermes_home() / "config.yaml"
     if not config_path.exists():
         return "", "", "App B (Feishu CLI) is not configured. Please complete setup on the Channels page."
@@ -149,45 +102,6 @@ def _get_bot_token_from_config() -> tuple[str, str, str]:
     except Exception as exc:
         return "", "", f"App B token request failed: {exc}"
 
-
-def _refresh_user_token(app_id: str, app_secret: str, refresh_token: str) -> tuple[str, str, str]:
-    app_token_url = f"{_FEISHU_BASE}/open-apis/auth/v3/app_access_token/internal"
-    payload = json.dumps({"app_id": app_id, "app_secret": app_secret}).encode()
-    req = urllib.request.Request(
-        app_token_url, data=payload,
-        headers={"Content-Type": "application/json"}, method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        app_access_token = data.get("app_access_token", "")
-        if not app_access_token:
-            return "", "", f"Failed to get app_access_token for refresh: {data}"
-    except Exception as exc:
-        return "", "", f"App access token request failed: {exc}"
-
-    url = f"{_FEISHU_BASE}/open-apis/authen/v1/oidc/refresh_access_token"
-    refresh_payload = json.dumps({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-    }).encode()
-    req = urllib.request.Request(
-        url, data=refresh_payload,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {app_access_token}",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read())
-        if data.get("code") != 0:
-            return "", "", f"Token refresh failed: {data.get('msg', data)}"
-        token_data = data.get("data", {})
-        return token_data.get("access_token", ""), token_data.get("refresh_token", ""), ""
-    except Exception as exc:
-        return "", "", f"Token refresh request failed: {exc}"
 
 
 def _load_specialist_soul(specialist_id: str) -> str:
@@ -227,7 +141,7 @@ def _create_specialist_group(args: dict, **kwargs) -> str:
 
     specialist = SPECIALISTS[specialist_id]
 
-    user_token, app_id, err = _get_user_access_token()
+    user_token, app_id, err = _get_bot_token_from_config()
     if not user_token:
         return json.dumps({"error": err})
 
@@ -315,10 +229,7 @@ def _create_specialist_group(args: dict, **kwargs) -> str:
 
 
 def _check_requirements(**kwargs) -> bool:
-    """Available when App B credentials are accessible (token file or config.yaml)."""
-    if (_get_hermes_home() / ".lark-cli-user-token.json").exists():
-        return True
-    # Fallback: check if App B config is in config.yaml
+    """Available when App B credentials are configured in config.yaml."""
     config_path = _get_hermes_home() / "config.yaml"
     if config_path.exists():
         try:
