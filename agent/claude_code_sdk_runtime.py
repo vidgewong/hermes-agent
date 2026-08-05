@@ -432,24 +432,94 @@ def _build_hermes_tools_mcp_config(agent=None) -> dict:
     claude-agent-sdk >= 0.2.110 is available. Falls back to spawning
     agent.transports.hermes_tools_mcp_server as a stdio subprocess.
 
+    Also reads external MCP servers from ~/.hermes/config.yaml (mcp_servers)
+    and passes them through as additional SDK MCP server entries so Claude Code
+    can access them directly (e.g. atlassian-mcp, gitlab-mcp).
+
     Returns an empty dict if neither path is available (graceful degradation).
     """
+    servers: dict = {}
+
     # Try in-process MCP first (no subprocess, direct agent access).
     try:
         from agent.in_process_mcp import build_hermes_in_process_mcp
         config = build_hermes_in_process_mcp(agent)
         logger.info("using in-process MCP for hermes-tools")
-        return {"hermes-tools": config}
+        servers["hermes-tools"] = config
     except ImportError as exc:
         logger.warning(
             "in-process MCP unavailable (SDK too old?), falling back to stdio: %s", exc
         )
+        servers.update(_build_hermes_tools_mcp_config_stdio())
     except Exception as exc:
         logger.warning(
             "in-process MCP setup failed, falling back to stdio: %s", exc
         )
+        servers.update(_build_hermes_tools_mcp_config_stdio())
 
-    return _build_hermes_tools_mcp_config_stdio()
+    # Forward external MCP servers from ~/.hermes/config.yaml so Claude Code
+    # can call them directly (not proxied through hermes-tools).
+    servers.update(_load_external_mcp_servers())
+
+    return servers
+
+
+def _load_external_mcp_servers() -> dict:
+    """Read mcp_servers from Hermes config and convert to SDK McpServerConfig format.
+
+    Supports SSE (url + headers), HTTP (url + headers), and stdio (command + args + env).
+    Skips the hermes-tools entry if present (already handled by in-process MCP).
+    """
+    try:
+        from hermes_cli.config import load_config
+    except ImportError:
+        return {}
+
+    try:
+        config = load_config()
+        raw_servers = config.get("mcp_servers")
+        if not raw_servers or not isinstance(raw_servers, dict):
+            return {}
+    except Exception:
+        return {}
+
+    result: dict = {}
+    for name, cfg in raw_servers.items():
+        if name == "hermes-tools":
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        if not cfg.get("enabled", True):
+            continue
+
+        try:
+            url = cfg.get("url", "")
+            if url:
+                transport = cfg.get("transport", "").lower()
+                if transport == "sse" or "/sse" in url:
+                    entry = {"type": "sse", "url": url}
+                else:
+                    entry = {"type": "http", "url": url}
+                headers = cfg.get("headers")
+                if headers and isinstance(headers, dict):
+                    entry["headers"] = headers
+                result[name] = entry
+            elif cfg.get("command"):
+                entry = {"type": "stdio", "command": cfg["command"]}
+                if cfg.get("args"):
+                    entry["args"] = cfg["args"]
+                if cfg.get("env"):
+                    entry["env"] = cfg["env"]
+                result[name] = entry
+        except Exception as exc:
+            logger.debug("Skipping external MCP server %s: %s", name, exc)
+
+    if result:
+        logger.info(
+            "Forwarding %d external MCP server(s) to Claude Code SDK: %s",
+            len(result), ", ".join(result.keys()),
+        )
+    return result
 
 
 def _build_hermes_tools_mcp_config_stdio() -> dict:

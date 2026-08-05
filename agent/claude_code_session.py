@@ -246,13 +246,10 @@ class ClaudeCodeSession:
         # entirely, causing Claude to lose file-delivery conventions.
         _sdk_delegation_guidance = (
             "\n\n## Delegation & User Interaction\n"
-            "You have TWO delegation mechanisms:\n"
-            "- **Agent tool** (built-in): for focused subtasks with context isolation and "
-            "tool restrictions. Subagents run independently and return a summary. Best for "
-            "code review, research, analysis, and parallel work.\n"
-            "- **delegate_task** (MCP tool): for Hermes-aware work that needs gateway "
-            "session routing, depth tracking, background result delivery, or access to "
-            "Hermes-specific state. Best for long-running background tasks and orchestrated workflows.\n\n"
+            "Use the **Agent tool** to delegate subtasks to subagents. Each subagent gets "
+            "isolated context and returns a summary. Available subagents: code-reviewer, "
+            "researcher, general-worker (plus any skill-based agents). Subagents have "
+            "access to all hermes-tools MCP capabilities (file ops, terminal, web, etc.).\n\n"
             "For **AskUserQuestion**: only ask when the decision genuinely requires user "
             "input (ambiguous requirements, multiple valid approaches, destructive actions). "
             "For routine decisions, proceed autonomously."

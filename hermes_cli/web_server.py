@@ -15788,6 +15788,13 @@ async def _handle_chat_message(
 
     def _run_agent():
         try:
+            # The dashboard-im WebSocket path has no background delivery
+            # channel — set async_delivery=False so delegate_task falls back
+            # to synchronous execution instead of dispatching to a completion
+            # queue that nobody drains in this process.
+            from gateway.session_context import _SESSION_ASYNC_DELIVERY
+            _SESSION_ASYNC_DELIVERY.set(False)
+
             agent = _get_or_create_chat_agent(
                 session_id, profile,
                 soul_override=soul_override,

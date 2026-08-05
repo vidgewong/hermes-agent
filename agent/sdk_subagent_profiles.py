@@ -25,7 +25,9 @@ def build_hermes_agent_definitions() -> dict[str, Any] | None:
 
     agents: dict[str, AgentDefinition] = {}
 
-    # Core profiles
+    # Core profiles — all use Hermes MCP tools (mcp__hermes-tools__*) since
+    # Claude Code built-ins (Read, Grep, Bash, etc.) are blocked at the parent
+    # level via disallowed_tools. Subagents inherit MCP server access.
     agents["code-reviewer"] = AgentDefinition(
         description=(
             "Expert code reviewer for quality, security, and maintainability analysis. "
@@ -37,23 +39,25 @@ def build_hermes_agent_definitions() -> dict[str, Any] | None:
             "- Performance issues\n"
             "- Best practice violations\n"
             "- Maintainability concerns\n\n"
-            "Be thorough but concise. Cite specific lines."
+            "Be thorough but concise. Cite specific lines.\n"
+            "Use the hermes-tools MCP for file access: read_file, search_files, etc."
         ),
-        tools=["Read", "Grep", "Glob"],
+        disallowed_tools=["mcp__hermes-tools__terminal", "mcp__hermes-tools__write_file", "mcp__hermes-tools__patch"],
         model="sonnet",
     )
 
     agents["researcher"] = AgentDefinition(
         description=(
-            "Research agent with web access. Use for searching documentation, "
+            "Research agent with web and file access. Use for searching documentation, "
             "investigating APIs, finding examples, or gathering context from the web."
         ),
         prompt=(
             "You are a research specialist. Search the web and codebase to find "
             "relevant information. Synthesize findings into clear, actionable summaries. "
-            "Always cite your sources."
+            "Always cite your sources.\n"
+            "Use hermes-tools MCP: web_search, web_extract, read_file, search_files."
         ),
-        tools=["Read", "Grep", "Glob", "WebSearch", "WebFetch"],
+        disallowed_tools=["mcp__hermes-tools__terminal", "mcp__hermes-tools__write_file", "mcp__hermes-tools__patch"],
     )
 
     agents["general-worker"] = AgentDefinition(

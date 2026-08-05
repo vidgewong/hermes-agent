@@ -2528,12 +2528,14 @@ def _parse_session_key(session_key: str) -> "dict | None":
     Session keys follow the format
     ``agent:main:{platform}:{chat_type}:{chat_id}[:{extra}...]``.
     Returns a dict with ``platform``, ``chat_type``, ``chat_id``, and
-    optionally ``thread_id`` keys, or None if the key doesn't match.
+    optionally ``thread_id`` or ``user_id`` keys, or None if the key
+    doesn't match.
 
-    The 6th element is only returned as ``thread_id`` for chat types where
-    it is unambiguous (``dm`` and ``thread``).  For group/channel sessions
-    the suffix may be a user_id (per-user isolation) rather than a
-    thread_id, so we leave ``thread_id`` out to avoid mis-routing.
+    For DM/thread sessions the 6th element is ``thread_id``.
+    For group/channel sessions the suffix is ``user_id`` (per-user
+    isolation).  Both are extracted so that async-delegation routing
+    can reconstruct a SessionSource that produces the same session_key
+    via build_session_key().
     """
     parts = session_key.split(":")
     if len(parts) >= 5 and parts[0] == "agent" and parts[1] == "main":
@@ -2542,8 +2544,11 @@ def _parse_session_key(session_key: str) -> "dict | None":
             "chat_type": parts[3],
             "chat_id": parts[4],
         }
-        if len(parts) > 5 and parts[3] in {"dm", "thread"}:
-            result["thread_id"] = parts[5]
+        if len(parts) > 5:
+            if parts[3] in {"dm", "thread"}:
+                result["thread_id"] = parts[5]
+            else:
+                result["user_id"] = parts[5]
         return result
     return None
 
@@ -15143,7 +15148,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             logger.error("Watch notification injection error: %s", e)
 
     def _enrich_async_delegation_routing(self, evt: dict) -> None:
-        """Fill platform/chat_id/thread_id/chat_type on an async-delegation event.
+        """Fill platform/chat_id/thread_id/user_id/chat_type on an async-delegation event.
 
         Async-delegation completion events only carry ``session_key`` (the
         daemon worker has no access to the per-message routing metadata the
@@ -15162,6 +15167,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         evt["chat_id"] = parsed.get("chat_id", "")
         if parsed.get("thread_id"):
             evt["thread_id"] = parsed["thread_id"]
+        if parsed.get("user_id"):
+            evt["user_id"] = parsed["user_id"]
 
     async def _async_delegation_watcher(self, interval: float = 2.0) -> None:
         """Drain async-delegation completions and inject them as new turns.

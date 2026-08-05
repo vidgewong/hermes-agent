@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _BLOCKED_TOOLS: frozenset[str] = frozenset({
     "clarify",
     "computer_use",
+    "delegate_task",
 })
 
 _STATEFUL_TOOLS: frozenset[str] = frozenset({
